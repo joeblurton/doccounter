@@ -1,0 +1,373 @@
+<?php
+/**************************************************************************************************************
+
+    NAME
+        RtfMerger.phpclass
+
+    DESCRIPTION
+        A class for merging Rtf documents.
+	This class is different from the other Rtf* classes, in that it does not inherit from RtfDocument.
+	It has been designed for fast batch processing, not for in-place modifications.
+
+	A typical usage could be :
+
+		$merger		=  new RtfMerger ( 'sample1.rtf', 'sample2.rtf', 'sample3.rtf' ) ;
+
+	Parameters to the RtfMerger constructor are optional ; you can later add new Rtf files by using the
+	Add() method :
+
+		$merger -> Add ( 'sample4.pdf' ) ;
+
+	and you can even specify instances of RtfDocument classes either to the constructor or to the Add() 
+	method :
+
+		$merger -> Add ( new RtfStringDocument ( 'sample5.rtf' ) ) ;
+		$merger -> Add ( new RtfFileDocument ( 'sample6.rtf' ) ) ;
+		$merger -> Add ( new RtfStringTemplater ( 'sample7.rtf', $my_variables_array ) ) ;
+
+	Once all documents have been specified to the Merger object, you can save the merged contents as a 
+	single document using the following method :
+
+		$merger -> SaveTo ( 'output.rtf' ) ;
+
+	If you feel comfortable enough with your memory, then you can even merge your input Rtf contents to an
+	output string :
+
+		$result		=  $merger -> AsString ( ) ;
+
+    NOTES
+	The RtfMerger class has been designed to minimize memory footprint ; memory is only allocated when 
+	using the SaveTo() or AsString() methods.
+	In the case of AsString(), the contents of ALL your documents will of course be present in memory.
+	In the case of SaveTo(), the memory will be occupied by :
+	- The global Rtf header build when merging your input files
+	- When processing a document, its body part will reside into memory until it is written to disk
+
+    AUTHOR
+        Christian Vigh, 08/2016.
+
+    HISTORY
+    [Version : 1.0]	[Date : 2016-08-18]     [Author : CV]
+	Initial version.
+
+    [Version : 1.0.1]	[Date : 2016-09-30]     [Author : CV]
+	. The ArrayAccess interface was not properly implemented.
+	. There was a name mismatch between the document information properties (Title, Subject, etc.) and their
+	  counterparts in the $GlobalHeader object (InfoTitle, InfoSubject, etc.).
+
+ **************************************************************************************************************/
+
+require_once ( dirname ( __FILE__ ) . '/RtfDocument.phpclass' ) ;
+require_once ( dirname ( __FILE__ ) . '/Merger/RtfMergerDocument.phpclass' ) ;
+require_once ( dirname ( __FILE__ ) . '/Merger/RtfMergerHeader.phpclass' ) ;
+
+
+/*==============================================================================================================
+
+    class RtfMerger -
+        A class for merging Rtf documents.
+
+  ==============================================================================================================*/
+class  RtfMerger		//extends		Object
+				implements	\ArrayAccess, \Countable, \IteratorAggregate
+   {
+	// Merging options
+	const		RTFMERGE_NONE			=   0x0000 ;			// No specific options
+	const		RTFMERGE_STRINGS_AS_FILENAMES	=   0x0001 ;			// When a string is specified for adding a document, consider it as a filename
+	const		RTFMERGE_STRINGS_AS_DATA	=   0x0002 ;			// When a string is specified for adding a document, consider it as Rtf data
+
+	const		RTFMERGE_STRINGS_MASK		=   0x0003 ;
+
+	// Default paper size (A4) - 1cm is approximately 567 twips
+	const		DEFAULT_A4_PAPER_WIDTH		=  11907 ;
+	const		DEFAULT_A4_PAPER_HEIGHT		=  16839 ;
+
+	// List of documents to be merged
+	protected	$Documents			=  [] ;
+	// Merging options
+	public		$Options			=  self::RTFMERGE_NONE ;
+	// Global header - This object is to be seen as a way for RtfMergerDocument objects to use/define static data that is
+	// local ony to a particular RtfMerger class instance
+	private		$GlobalHeader ;
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        Constructor
+	
+	    PROTOTYPE
+	        $merger		=  new  RtfMerger ( [ $document, ... | $options ] ) ;
+	
+	    DESCRIPTION
+	        Creates an RtfMerger. Optional documents can be specified or later added using the AddDocument*() methods
+		or the array access interface.
+	
+	    PARAMETERS
+	        $document (mixed) -
+	                Either a class inheriting from the RtfDocument class, a filename or Rtf contents.
+			When a string is specified, its interpretation depends on the the value of the $options
+			parameter (or $Options property) :
+			- When the RTFMERGE_STRINGS_AS_FILENAMES flag is set, all the strings specified as the constructor
+			  parameters will be considered as filenames, and an object of class RtfFileDocument will be
+			  created
+			- When the RTFMERGE_STRINGS_AS_DATA flag is set, all strings specified as the constructor
+			  parameters will be considered as Rtf data, and an object of class RtfStringDocument will be
+			  created.
+
+			Of course, you can also specify objects inheriting from the RtfDocument class, such as 
+			RtfFileTemplater or RtfStringTemplater.
+
+		$options (integer) :
+			A combination of the following flags :
+
+			- RTFMERGE_STRINGS_AS_FILENAMES :
+				This option says that whenever a string is specified when adding a document by
+				specifying only a string, it should be considered as a filename which will be used to 
+				create an object of type RTfFileDocument.
+			- RTFMERGE_STRINGS_AS_DATA :
+				This one says that string should be considered as Rtf data that should be used to create
+				an object of type RtfStringDocument.
+			- RTFMERGE_NONE :
+				Default options.
+
+			When nothing is specified, the RTFMERGE_STRINGS_AS_FILENAMES is the default option.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function	  __construct ( )
+	   {
+		//parent::__construct ( ) ;
+
+		$objects	=  [] ;
+		$argv		=  func_get_args ( ) ;
+		$argc		=  count ( $argv ) ;
+		
+		// Loop through arguments which can be :
+		// - An object inheriting from RtfDocument
+		// - A string, which will be interpreted as either a filename containing Rtf data or containing directly Rtf data
+		// - An integer value, which will be used to set the $Options property (RTFMERGE_* constants)
+		for  ( $i = 0 ; $i  <  $argc ; $i ++ )
+		   {
+			if  ( is_subclass_of ( $argv [$i], 'RtfDocument' )  ||  is_string ( $argv [$i] ) )
+				$objects []		=  $argv [$i] ;
+			else if  ( is_numeric ( $argv [$i] ) )
+				$this -> Options	=  $argv [$i] ;
+			else
+				error ( new RtfException ( "Bad type for parameter #" . ( $i + 1 ) . "." ) ) ;
+		    }
+
+		// When neither the RTFMERGE_STRINGS_AS_FILENAMES nor the RTFMERGE_STRINGS_AS_DATA flag has been specified, the
+		// default is RTFMERGE_STRINGS_AS_FILENAMES
+		if  ( ! ( $this -> Options & self::RTFMERGE_STRINGS_MASK ) )
+			$this -> Options	|=  self::RTFMERGE_STRINGS_AS_FILENAMES ;
+
+		// Create a global header
+		$this -> GlobalHeader		=  new  RtfMergerHeader ( ) ;
+
+		// Add the documents that have been specified to the constructor, if any
+		foreach  ( $objects  as  $object )
+			$this -> Add ( $object ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+		Getter and setter for the following document information properties :
+	
+			Title
+			Subject
+			Author
+			Manager
+			Company
+			Operator
+			Category
+			Keywords
+			Comment
+			Summary
+			Version
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  __get ( $member )
+	   {
+		$real_member	=  "Info$member" ;
+
+		if  ( isset ( $this -> GlobalHeader -> $real_member ) )
+			return ( $this -> GlobalHeader -> $real_member ) ;
+		else
+			error ( new \Thrak\System\UndefinedPropertyException ( $member ) ) ;
+	    }
+
+
+	public function  __set ( $member, $value )
+	   {
+		$real_member	=  "Info$member" ;
+
+		if  ( isset ( $this -> GlobalHeader -> $real_member ) )
+			$this -> GlobalHeader -> $real_member	=  $value ;
+		else
+			error ( new \Thrak\System\UndefinedPropertyException ( $member ) ) ;
+	    }
+
+
+	/**************************************************************************************************************
+	 **************************************************************************************************************
+	 **************************************************************************************************************
+	 ******                                                                                                  ******
+	 ******                                                                                                  ******
+	 ******                                          PUBLIC METHODS                                          ******
+	 ******                                                                                                  ******
+	 ******                                                                                                  ******
+	 **************************************************************************************************************
+	 **************************************************************************************************************
+	 **************************************************************************************************************/
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        Add - Adds a document to the list of documents to be merged.
+	
+	    PROTOTYPE
+	        $merger -> Add ( $object ) ;
+	
+	    DESCRIPTION
+	        Adds a document to the list of documents to be merged.
+
+	    PARAMETERS
+		$object (mixed) -
+			Either an object inheriting from the RtfDocument base class, or a string.
+			In the latter case, the string will be interpreted differently depending on the bits set in the
+			Options property :
+			- The string will be interpreted as a file name if the RTFMERGE_STRINGS_AS_FILENAMES option is
+			  set (this is the default) ; in this case, an object of type RtfFileDocument will be created
+			- The string will be interpreted as Rtf contents if the RTFMERGE_STRINGS_AS_DATA option is set.
+			  In this case, an object of class RtfStringDocument will be created.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  Add ( $object, $offset = false )
+	   {
+		if  ( is_subclass_of ( $object, 'RtfDocument' ) )
+			$instance	=  $object ;
+		else if  ( is_string ( $object ) )
+		   {
+			if  ( $this -> Options & self::RTFMERGE_STRINGS_AS_FILENAMES )
+				$instance	=  new RtfFileDocument ( $object ) ;
+			else if  ( $this -> Options & self::RTFMERGE_STRINGS_AS_DATA )
+				$instance	=  new RtfStringDocument ( $object ) ;
+			else 
+				error ( new RtfException ( "The parameter specified to the Add() method should be either a string or an object " .
+							   "inheriting from the RtfDocument class." ) ) ;
+		    }
+
+		if  ( $offset  ===  false )
+			$this -> Documents []		=   new RtfMergerDocument ( $this, $instance, $this -> GlobalHeader ) ;
+		else
+			$this -> Documents [ $offset ]	=   new RtfMergerDocument ( $this, $instance, $this -> GlobalHeader ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        AsString - Merges documents and returns merged contents as a string.
+	
+	    PROTOTYPE
+	        $rtf_data	=  $merger -> AsString ( ) ;
+	
+	    DESCRIPTION
+	        Merges all the documents that have been added through the class constructor, or by using the 
+		AddDocument*() methods or ArrayAccess interface, and returns the corresponding Rtf contents.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function AsString ( $filename )
+	   {
+		$result		=  $this -> GlobalHeader -> BuildHeader ( ) ;
+		$section	=  '' ;
+
+		foreach  ( $this -> Documents  as  $document )
+		   {
+			$result		.=  $document -> GetBody ( ) . $section ;
+			$section	=  "\\sect\r\n" ;
+		    }
+
+		return ( $result ) ;
+	    }
+
+
+	public function  __tostring ( )
+	   { return ( $this -> AsString ( ) ) ; }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        SaveTo - Merges documents to the specified output file.
+	
+	    PROTOTYPE
+	        $merger -> SaveTo ( $filename ) ;
+	
+	    DESCRIPTION
+	        Merges all the documents that have been added through the class constructor, or by using the 
+		AddDocument*() methods or ArrayAccess interface, to the specified output file.
+	
+	    PARAMETERS
+	        $file (string) -
+	                Path of the output file that will receive the merged Rtf contents.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function SaveTo ( $filename )
+	   {
+		if  ( ( $fp  =  @fopen ( $filename, "w" ) )  ===  false )
+			error ( new RtfException ( "Unable to open file \"$filename\"." ) ) ;
+
+		$header		=  $this -> GlobalHeader -> BuildHeader ( ) ;
+		fwrite ( $fp, $header ) ;
+		unset ( $header ) ;
+		$section	=  '' ;
+
+		foreach  ( $this -> Documents  as  $document )
+		   {
+			$data		=  $document -> GetBody ( ) ;
+			fwrite ( $fp, "$section$data\r\n" ) ;
+			$section	=  "\\sect\r\n" ;
+		    }
+
+		fwrite ( $fp, "}" ) ;
+		fclose ( $fp ) ;
+	    }
+
+
+	/**************************************************************************************************************
+	 **************************************************************************************************************
+	 **************************************************************************************************************
+	 ******                                                                                                  ******
+	 ******                                                                                                  ******
+	 ******                                    INTERFACE IMPLEMENTATIONS                                     ******
+	 ******                                                                                                  ******
+	 ******                                                                                                  ******
+	 **************************************************************************************************************
+	 **************************************************************************************************************
+	 **************************************************************************************************************/
+
+	// Countable interface
+	public function  count ( )
+	   { return ( count ( $this -> Documents ) ) ; }
+
+
+	// ArrayAccess interface
+	public function  offsetExists ( $offset )
+	   { return  ( $offset  >=  0  &&  $offset  <  count ( $this -> Documents ) ) ; }
+
+	public function  offsetGet ( $offset )
+	   { return ( $this -> Documents [ $offset ] -> Document ) ; }
+
+	public function  offsetSet ( $offset, $value )
+	   { $this -> Add ( $value, $offset ) ; }
+	
+	public function  offsetUnset ( $offset )
+	   { unset ( $this -> Documents [ $offset ] ) ; }
+
+	
+	// Iterator interface
+	public function  getIterator ( )
+	   { return ( new \ArrayIterator ( $this -> Documents ) ) ; }
+    }

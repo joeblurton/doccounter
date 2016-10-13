@@ -1,0 +1,336 @@
+<?php
+/**************************************************************************************************************
+
+    NAME
+	RtfToken.phpclass
+
+    DESCRIPTION
+	Implements classes that map to various Rtf tokens.
+
+    AUTHOR
+        Christian Vigh, 10/2015.
+
+    HISTORY
+    [Version : 1.0]	[Date : 2015/10/16]     [Author : CV]
+        Initial version.
+
+ **************************************************************************************************************/
+
+
+/*==============================================================================================================
+
+    RtfToken class -
+        Base class for all RtfToken classes.
+
+  ==============================================================================================================*/
+abstract class 	RtfToken 		// extends Object
+   {
+	// Token properties
+	public 		$Type ;			// Token type (one of the RtdDocument::TOKEN_* constants)
+	public  	$Text ;			// Full token text
+	public 		$SpaceAfter ;		// True if the token is followed by an optional space
+	public 		$Offset ;		// Offset, in the Rtf stream, of the start of the token
+	public 		$Line,			// Line/column of the start of the token, in the Rtf stream
+			$Column ;
+
+
+	// Constructor -
+	//	Initializes an RtfToken object
+	public function  __construct ( $type, $text, $space_after, $offset, $line, $column )
+	   {
+		// parent::__construct ( ) ;
+
+		$this -> Type 		=  $type ;
+		$this -> Text 		=  $text ;
+		$this -> SpaceAfter 	=  $space_after ;
+		$this -> Offset 	=  $offset ;
+		$this -> Line 		=  $line ;
+		$this -> Column 	=  $column ;
+	    }
+
+
+	// ToRtf -
+	//	Returns the token "as is", without interpretation
+	public function  ToRtf ( )
+	   { return ( $this -> Text ) ; }
+
+
+	// ToText -
+	//	Returns the token text, with possible interpretation.
+	//	This method can be overridden by derived classes to return a text value representing the real token
+	//	text, not its Rtf representation.
+	//	The ToText() method of the RtfEscapedExpression token class for example returns the character that
+	//	has been escaped with a backslash (eg, ToText() for "\{" will return "{").
+	public function  ToText ( )
+	   { return ( $this -> ToRtf ( ) ) ; }
+
+
+	// __tostring -
+	//	Returns the Rtf contents for this object.
+	public function  __tostring ( )
+	   { return ( $this -> ToRtf ( ) ) ; }
+
+    }
+
+
+/*==============================================================================================================
+
+    RtfLeftBraceToken class -
+        Implements a left brace Rtf token.
+
+  ==============================================================================================================*/
+class  RtfLeftBraceToken		extends  RtfToken
+   {
+	public function  __construct ( $space_after, $offset, $line, $column )
+	   {
+		$text 	=  '{' ;
+
+		if  ( $space_after )
+			$text 	.=  ' ' ;
+
+		parent::__construct ( RtfDocument::TOKEN_LBRACE, $text, $space_after, $offset, $line, $column ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfRightBraceToken class -
+        Implements a right brace Rtf token.
+
+  ==============================================================================================================*/
+class  RtfRightBraceToken		extends  RtfToken
+   {
+	public function  __construct ( $space_after, $offset, $line, $column )
+	   {
+		$text 	=  '}' ;
+
+		if  ( $space_after )
+			$text 	.=  ' ' ;
+
+	   	parent::__construct ( RtfDocument::TOKEN_RBRACE, $text, $space_after, $offset, $line, $column ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfInvalidToken class -
+        Implements an invalid Rtf token. This is the case for example when construct such as "\0", "\a", "\("
+	etc. are encountered.
+
+  ==============================================================================================================*/
+class  RtfInvalidToken 			extends  RtfToken
+   {
+	public function  __construct ( $text, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_INVALID, $text, false, $offset, $line, $column ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfNewlineToken class -
+        Implements a newline token (either "\r\n" or "\n").
+
+  ==============================================================================================================*/
+class  RtfNewlineToken 			extends  RtfToken
+   {
+	public function  __construct ( $text, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_NEWLINE, $text, false, $offset, $line, $column ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfControlSymbolToken class -
+        Implements a control symbol, such as \~ (unbreackable space), \: (subindex of an index entry), etc.
+
+  ==============================================================================================================*/
+class  RtfControlSymbolToken 		extends  RtfToken
+   {
+	public 	$Char ;			// Character after the backslash
+
+
+	public function  __construct  ( $char, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_CONTROL_SYMBOL, "\\$char", false, $offset, $line, $column ) ;
+
+		$this -> Char 		=  $char ;
+	    }
+
+
+	// ToText -
+	//	Returns the character associated with the Rtf sequence, when such an association exists.
+	//	For example :
+	//	- "\~" (unbreakable space) will yield to " " (space)
+	//	- "\-" (optional hyphen) will yield to "-" (hyphen)
+	//	- and same for "\_"
+	//	For all other control symbols, will return the Rtf contents themselves (for example, "\:")
+	public function  ToText ( )
+	   {
+		switch ( $this -> Char )
+		   {
+		   	case 	'~' :  return ( ' ' ) ;
+		   	case 	'-' :
+		   	case    '_' :  return ( '-' ) ;
+		   	default     :  return ( $this -> Text ) ;
+		    }
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfControlWordToken class -
+        Implements a control word, such as \par.
+	For special, non-standard control words, will include the \* control symbol (for example : \*\panose).
+
+  ==============================================================================================================*/
+class  RtfControlWordToken 		extends  RtfToken
+   {
+	public 		$ControlWord ;			// Control word
+	public 		$Parameter ;			// Optional control word parameter
+	public 		$Special ;			// When true, the control word is preceded with the "\*" control symbol
+
+
+	public function  __construct  ( $word, $space, $special, $offset, $line, $column )
+	   {
+		if  ( $special )
+			$text 	=  "\\*\\$word" ;
+		else
+			$text 	=  "\\$word" ;
+
+		parent::__construct ( RtfDocument::TOKEN_CONTROL_WORD, $text, $space, $offset, $line, $column ) ;
+
+		// Extract control word parameter - any sequence of digits, optionally preceded by a minus sign
+		preg_match ( '/^ (?P<word> [a-z]+) (?P<param> -? \d+)? /ix', $word, $match ) ;
+
+		$this -> Special 	=  $special ;
+		$this -> ControlWord 	=  $match [ 'word' ] ;
+		$this -> Parameter 	=  ( isset ( $match [ 'param' ] ) ) ?  $match [ 'param' ] : '' ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfEscapedExpression class -
+        Implements an escaped expression containing characters that may be interpreted as Rtf tokens
+	(example : \{, \} and \\).
+
+  ==============================================================================================================*/
+class  RtfEscapedExpressionToken 		extends  RtfToken
+   {
+	public 	$Char ;
+
+
+	public function  __construct  ( $char, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_ESCAPED_CHAR, "\\$char", false, $offset, $line, $column ) ;
+
+		$this -> Char 		=  $char ;
+	    }
+
+
+	public function  ToText ( )
+	   { return ( $this -> Char ) ; }
+    }
+
+
+/*==============================================================================================================
+
+    RtfEscapedCharacterToken class -
+        Implements a character expression using a hexadecimal code (\'xy).
+
+  ==============================================================================================================*/
+class  RtfEscapedCharacterToken 		extends  RtfToken
+   {
+	public 	$Char ;
+	public 	$Ord ;
+
+
+	public function  __construct  ( $hex, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_CHAR, "\\'$hex", false, $offset, $line, $column ) ;
+
+		$this -> Ord 		=  hexdec ( $hex ) ;
+		$this -> Char 		=  chr ( $this -> Ord ) ;
+	    }
+
+
+	public function  ToText ( )
+	   { return ( $this -> Char ) ; }
+    }
+
+
+/*==============================================================================================================
+
+    RtfDataToken class -
+        Base class for all the classes that hold free-form data (PCDATA, SDATA, BDATA).
+
+  ==============================================================================================================*/
+abstract class  RtfDataToken 				extends  RtfToken
+   {
+	public		$RelatedControlWord ;	// Related (tracked) control word
+
+
+	public function  __construct ( $type, $data, $offset, $line, $column )
+	   {
+		parent::__construct ( $type, $data, false, $offset, $line, $column ) ;
+            }
+    }
+
+
+/*==============================================================================================================
+
+    RtfPCDataToken class -
+        Holds free-form text data.
+
+  ==============================================================================================================*/
+class  RtfPCDataToken 					extends  RtfDataToken
+   {
+	public function  __construct ( $data, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_PCDATA, $data, false, $offset, $line, $column ) ;
+	    }
+
+
+	public function  ToText ( )
+	   {
+		return ( str_replace ( [ "\r", "\n" ], '', $this -> Text ) ) ;
+	    }
+    }
+
+/*==============================================================================================================
+
+    RtfSDataToken class -
+        Holds hexadecimal data, that can be found in \pict tags.
+
+  ==============================================================================================================*/
+class  RtfSDataToken 					extends  RtfDataToken
+   {
+	public function  __construct ( $data, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_SDATA, $data, $offset, $line, $column ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfBData class -
+        Holds binary data, than can be found in \bin tags.
+
+  ==============================================================================================================*/
+class  RtfBDataToken 					extends  RtfDataToken
+   {
+	public function  __construct ( $data, $offset, $line, $column )
+	   {
+		parent::__construct ( RtfDocument::TOKEN_BDATA, $data, $offset, $line, $column ) ;
+	    }
+    }
+

@@ -1,0 +1,779 @@
+<?php
+/**************************************************************************************************************
+
+    NAME
+	RtfParser.phpclass
+
+    DESCRIPTION
+    	A generic parser for Rtf data.
+
+    AUTHOR
+        Christian Vigh, 10/2015.
+
+    HISTORY
+    [Version : 1.0]	[Date : 2015/10/16]     [Author : CV]
+        Initial version.
+
+    [Version : 1.0.1]	[Date : 2016/09/30]     [Author : CV]
+	. Changed the TrackControlWord() method, which did not correctly take into account the specified control
+	  word when a default value was specified.
+
+ **************************************************************************************************************/
+
+
+/*==============================================================================================================
+
+    RtfParser class -
+        Base class for the RtfStringParser and RtfFileParser classes.
+
+  ==============================================================================================================*/
+abstract class 	RtfParser 	extends  RtfDocument
+   {
+	// Position counters
+	public	 	$CurrentPosition,				// Offset from start of file
+			$CurrentLine,					// Current line and column
+			$CurrentColumn ;
+	public  	$NestingLevel ;					// Current brace nesting level
+
+	// Various information processed by the __get_next_token() function
+	protected 	$ContentsLength ;				// Rtf contents length
+	protected	$TrackedControlWords		=  [] ;		// Control words to be tracked
+	protected	$IgnoredCompounds		=  [] ;
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        Constructor.
+
+	    DESCRIPTION
+		Instantiates an RtfParser object.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  __construct ( )
+	   {
+		// Call the parent constructor with the parameters specified after $indentation_size.
+		$argv 		=  func_get_args ( ) ;
+
+		call_user_func_array ( [ 'parent', '__construct' ], $argv ) ;
+
+		// Initialize everything
+		$this -> Reset ( ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        GetControlWordValue - Get current parameter value for the specified control word.
+	
+	    PROTOTYPE
+	        $value	=  $parser -> GetControlWordValue ( $word, $default = '' ) ;
+	
+	    DESCRIPTION
+	        Gets the currently applicable parameter value for the specified control word.
+		The best example I can give for explaining the utility of this method is regarding Unicode characters,
+		which are specified by the \u tag like in the following example :
+
+			\u10356
+
+		However, Unicode characters are followed by character symbols (using the "\'" tag) which gives the number
+		of the code page that best matches the preceding Unicode character :
+
+			\u10356\'a1\'b0
+
+		The number of character symbols that follow a Unicode character specification is given by the \uc tag ; 
+		in the above example, it should be written like this :
+
+			\uc2 \u10356\'a1\'b0
+
+		However, the specification states that this number (the parameter of the \uc2 tag) should be tracked and
+		that a stack of applicable values should be handled, to keep applicable values depending on the current
+		curly brace nesting level (the \uc tag may be present elsewhere in the document, not specifically before
+		Unicode character specifications, and its default value should be 1).
+	
+	    PARAMETERS
+	        $word (string) -
+	                Control word, without the leading backslash.
+
+		$default (mixed) -
+			Default value, if the control word has not been tracked using the TrackControlWord() method.
+	
+	    RETURN VALUE
+	        Returns either the current parameter value for the specified control word (which is dependent of the
+		current nesting level if the control word is stackable), or $default otherwise.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetControlWordValue ( $word, $default = '' )
+	   {
+		if  ( isset ( $this -> TrackedControlWords [ $word ] ) )
+		   {
+			$entry		=  $this -> TrackedControlWords [ $word ] ;
+
+			if  ( $entry [ 'stackable' ] )
+			   {
+				if  ( isset ( $entry [ 'stack' ] [ $this -> NestingLevel ] ) )
+					return ( $entry [ 'stack' ] [ $this -> NestingLevel ] [ 'value' ] ) ;
+				else if  ( isset ( $entry [ 'stack' ] [0] ) )
+					return ( $entry [ 'stack' ] [0] [ 'value' ] ) ;
+			    }
+			else
+				return ( $entry [ 'stack' ] [0] [ 'value' ] ) ;
+		    }
+
+		return ( $default ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        IgnoreCompounds - Sets the list of compound tags to be ignored.
+	
+	    PROTOTYPE
+	        $parser -> IgnoreCompounds ( $list ) ;
+	
+	    DESCRIPTION
+	        Ignores the specified list of compound tags (such as "\fonttbl") by ignoring them.
+	
+	    PARAMETERS
+	        $list (array of strings) -
+	                List of compound control words to be skipped.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  IgnoreCompounds ( $list )
+	   {
+		// Flip the array because it's really faster to check for the existence of a key in an associative array
+		// than verifying the presence of a value using in_array()
+		$this -> IgnoredCompounds	=  array_flip ( $list ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        NextToken - Retrieves the next Rtf token.
+
+	    PROTOTYPE
+	        $token		=  $parser -> NextToken ( ) ;
+
+	    DESCRIPTION
+	        Retrieves the next Rtf token available from the input stream.
+
+	    RETURN VALUE
+	    	Returns an instance of one of the Rtf*Token classes describing the token type and contents, or false
+	    	if no more tokens are available.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  NextToken ( )
+	   {
+		while  ( ( $token = $this -> __get_next_token ( $this -> CurrentPosition ) )  ===  -1 )
+			;
+
+		return ( $token ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        Reset - Resets the parser object.
+
+	    PROTOTYPE
+	        $parser -> Reset ( ) ;
+
+	    DESCRIPTION
+	        Resets the parser object so that parsing can restart using the same Rtf contents.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  Reset ( )
+	   {
+		$this -> CurrentPosition 	=  0 ;
+		$this -> CurrentLine 		=  1 ;
+		$this -> CurrentColumn		=  0 ;
+
+		$this -> ContentsLength 	=  count ( $this ) ;
+		$this -> TrackedControlWords	=  [] ;
+		$this -> NestingLevel 		=  0 ;
+
+		$this -> TrackControlWord ( 'pict', false ) ;
+		$this -> TrackControlWord ( 'bin' , false ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        SkipCompound - Skips a compound statement
+
+	    PROTOTYPE
+	        $parser -> SkipCompound ( ) ;
+
+	    DESCRIPTION
+	        Some Rtf constructs may not be of interest to you, depending on the result you want to achieve. Suppose
+	        for example that you do not want to interpret anything on the font table, which has a definition that
+	        looks like :
+
+	        	{\fonttbl{font definition 1}...{font definition n}}
+
+	        SkipCompound() allows you to continue past the closing brace that terminates the font table started by
+	        "{\fonttbl", ignoring any content between these two delimiters.
+
+	        Note that SkipCompound() will decrement the current nesting level.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  SkipCompound ( )
+	   {
+		$pos 	=  $this -> to_closing_delimiter ( $this -> CurrentPosition ) ;
+
+		if  ( $pos  !==  false )
+		   {
+			$data 	=  $this -> substr ( $this -> CurrentPosition, $pos - $this -> CurrentPosition) ;
+			$this -> __update_position ( $data ) ;
+
+			$this -> CurrentPosition 	=  $pos ;
+			$this -> NestingLevel -- ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        TrackControlWord - Tracks the specified control word.
+	
+	    PROTOTYPE
+	        $parser -> TrackControlWord ( $word, $stackable, $default_value = false ) ;
+	
+	    DESCRIPTION
+	        Tracks a control word specification in the current Rtf document. This allows for example to associate
+		raw data with a control word, such as for the "\pict" tags.
+	
+	    PARAMETERS
+	        $word (string) -
+	                Control word to be tracked.
+
+		$stackable (boolean) -
+			Indicates whether the control word parameter value can be nested within braces. This is not the
+			case for example of \pict constructs, where the first data available will be the image contents
+			themselves ; however, constructs such as \ucx, where "x" represents the number of bytes in a
+			Unicode character specification that can be found afterwards, can be stacked. Every closing 
+			brace will pop up the last value of "x".
+
+		$default_value (string) -
+			When non-false, specifies an initial default value for the control word. This parameter is mainly
+			used for stackable control words.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  TrackControlWord ( $word, $stackable, $default_value = false )
+	   {
+		$this -> TrackedControlWords [ $word ]	=  
+		   [ 
+			'word'			=>  $word,
+			'stackable'		=>  $stackable, 
+			'stack'			=> [] 
+		    ] ;
+
+		if  ( $default_value  !==  false )
+		   {
+			$this -> TrackedControlWords [ $word ] [ 'stack' ] [ $this -> NestingLevel ]	=  
+			   [ 
+				'token'			=>  new RtfControlWordToken ( "$word$default_value", false, false, -1, -1, -1 ),
+				'nesting-level'		=>  $this -> NestingLevel, 
+				'value'			=>  $default_value 
+			    ] ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        __get_next_token - Retrieves the next token.
+
+	    PROTOTYPE
+	        $token	=  $this -> __get_next_token ( &$next_index ) ;
+
+	    DESCRIPTION
+	        Retrieves the next token from the Rtf stream and updates the specified character index to point
+		to the character immediately after the token.
+		Note that some tokens (braces or control words) can be followed by an optional space, which will be
+		considered to be part of the token itself. When such a situation occurs, the $next_index paraameter will
+		point after this optional space.
+
+	    PARAMETERS
+	        $next_index (integer) -
+	                On input, supplies the character offset in the Rtf stream where the scan is to be started.
+			On output, contains the character offset immediately after the parsed token.
+
+	    RETURN VALUE
+	        Returns one of the Rtf*Token classes instance, or false if end of data has been reached.
+		The method internally returns -1 if the found token is a control word belonging to the list of ignored
+		compounds (as defined in the $this -> IgnoredCompounds array).
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	private function  __get_next_token ( &$next_index )
+	   {
+		if  ( $next_index  >=  $this -> ContentsLength )
+			return ( false ) ;
+
+		// Internal buffer for collecting characters from syntactic elements
+		$data 				=  '' ;
+		$data_length 			=  0 ;
+		$start 				=  $next_index ;
+
+		// Get next character
+		$ch 		=  $this [ $next_index ++ ] ;
+		$this -> CurrentColumn ++ ;
+
+		// Now the choice is simple :
+		// - Either an opening or closing brace
+		// - A control word or control symbol
+		// - PCDATA (text), SDATA (hex contents) or BDATA (binary contents)
+		switch  ( $ch )
+		   {
+			// Opening brace : increment the current nesting level
+		   	case 	'{' :
+		   		$this -> NestingLevel ++ ;
+
+				/// Don't forget the optional space
+		   		if  ( isset ( $this [ $next_index ] )  &&  $this [ $next_index ]  ==  ' ' )
+		   		   {
+		   			$space 		=  true ;
+		   			$next_index ++ ;
+		   			$this -> CurrentColumn ++ ;
+		   		    }
+		   		else
+		   			$space 		=  false ;
+
+		   		$token 	=  new RtfLeftBraceToken ( $space, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+		   		break ;
+
+			// Closing brace : decrement the current nesting level
+		   	case 	'}' :
+				$this -> __leave_control_word ( ) ;
+		   		$this -> NestingLevel -- ;
+
+				// Don't forget the optional space
+		   		if  ( isset ( $this [ $next_index ] )  &&  $this [ $next_index ]  ==  ' ' )
+		   		   {
+		   			$space 		=  true ;
+		   			$next_index ++ ;
+		   			$this -> CurrentColumn ++ ;
+		   		   }
+		   		else
+		   			$space 		=  false ;
+
+		   		$token 	=  new RtfRightBraceToken ( $space, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+		   		break ;
+
+			// Control word or control symbol
+		   	case 	'\\' :
+		   		if  ( isset ( $this [ $next_index ] ) )
+		   		   {
+					$nch 		=  $this [ $next_index ] ;
+					$special 	=  false ;
+
+					switch  ( $nch )
+					   {
+						// Control symbols - note that a space after a control symbol is a normal space and does not belong
+						// to the control symbol itself, as it would to after a control word or braces.
+					   	case 	'~' :		// Unbreakable space
+					   	case 	'-' :		// Optional hyphen
+					   	case 	'_' :		// Unconditional hyphen
+					   	case 	':' :		// Subentry in an index entry
+					   	case	'|' :		// Formula character
+					   		$token 	=  new  RtfControlSymbolToken ( $nch, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+							$this -> CurrentColumn ++ ;
+					   		$next_index ++ ;
+					   		break ;
+
+					   	// These ones are escaped characters
+					   	case 	',' :		// Word accepts the sequence "\," and renders it as a regular comma (quirk ?)
+					   	case 	'{' :		// Characters otherwise recognized as Rtf tokens
+					   	case 	'}' :
+					   	case 	'\\' :
+					   		$token 	=  new  RtfEscapedExpressionToken ( $nch, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+							$this -> CurrentColumn ++ ;
+					   		$next_index ++ ;
+					   		break ;
+
+					   	// Character specification (\'xy). Although normally belonging to the "escaped expressions" in the Rtf
+					   	// specification (such as \\, \{ and \}), we will handle it separately
+					   	case 	"'" :
+							$this -> CurrentColumn ++ ;
+					   		$next_index ++ ;
+
+					   		if  ( $next_index + 2  <  $this -> ContentsLength )
+					   		   {
+								$hex 			 =  $this [ $next_index ++ ] . $this [ $next_index ++ ] ;
+								$token 			 =  new RtfEscapedCharacterToken ( $hex, $start,
+													$this -> CurrentLine, $this -> CurrentColumn ) ;
+								$this -> CurrentColumn 	+=  2 ;
+					   		    }
+					   		else
+					   			$token 	=  new RtfInvalidToken ( "\\'", $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+
+					   		break ;
+
+					   	// Control symbol preceding a control word (\*).
+					   	// Handle the paranoid case where there is no control word after it
+					   	case 	'*' :
+					   		$next_index ++ ;
+
+					   		if  ( isset ( $this [ $next_index ] )  &&  $this [ $next_index ]  ==  '\\' )
+					   		   {
+								$special 	=  true ;
+
+								if  ( ! isset ( $this [ $next_index + 1 ] ) )
+								   {
+									$token 	=  new RtfControlSymbolToken ( "*", $start + 2, $this -> CurrentLine, $this -> CurrentColumn ) ;
+									break ;
+								    }
+
+								$next_index ++ ;
+								$this -> CurrentColumn ++ ;
+								/* Intentionally fall through the default case */
+					   		    }
+					   		else
+					   		   {
+					   			$token 	=  new RtfControlSymbolToken ( "*", $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+					   			break ;
+					   		    }
+
+					   	// Default case : after the backslash, we should find a control word starting with alphabetic characters
+					   	// Any other combination will cause an invalid token to be returned
+					   	default :
+							// Search for the next brace, backslash or space character
+					   		if  ( ctype_alpha ( $this [ $next_index ] ) )
+					   		   {
+								$pos 	=  $this -> strchr ( "{}\\ \r\n;", $next_index ) ;
+								$space 	=  false ;
+
+								// Handle the paranoid case where the Rtf contents are incorrect
+								if  ( $pos  ===  false )
+									$pos 	=  $this -> ContentsLength - 1 ;
+								else
+								   {
+									if  ( $this [ $pos ]  ==  ' ' )
+										$space 	=  true ;
+									else
+										$pos -- ;
+								    }
+
+								// Retrieve the whole word (with its optional parameter)
+								$word 	=  $this -> substr ( $next_index, $pos - $next_index + 1 ) ;
+								$token 	=  new RtfControlWordToken ( $word, $space, $special, $start,
+										$this -> CurrentLine, $this -> CurrentColumn ) ;
+
+								$next_index 		 =  $pos + 1 ;
+								$this -> CurrentColumn 	+=  strlen ( $word ) ;
+
+								// Check if this control word is to be skipped
+								if  ( isset ( $this -> IgnoredCompounds [ $token -> ControlWord ] ) )
+								   {
+									$this -> SkipCompound ( ) ;
+									return ( -1 ) ;
+								    }
+
+								// Check for tracked control words
+								if  ( isset ( $this -> TrackedControlWords [ $token -> ControlWord ] ) ) 
+									$this -> __enter_control_word ( $token ) ;
+					   		    }
+							// A backslash followed by none of the above : this is an invalid token
+					   		else
+								$token 	=  new RtfInvalidToken ( "\\" . $this [ $next_index ], $start,
+											$this -> CurrentLine, $this -> CurrentColumn ) ;
+					    }
+		   		    }
+				// The backslash is the very last character of the Rtf data : hey guys, are you kidding ?
+		   		else
+		   		   {
+		   			$token 	=  new RtfInvalidToken ( '\\', $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+		   			$this -> CurrentColumn ++ ;
+		   		    }
+
+		   		break ;
+
+			// Carriage return or newline
+		   	case 	"\r" :
+				$next_index ++ ;
+				$token 	=  new RtfNewlineToken ( "\r\n", $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+				$this -> CurrentLine ++ ;
+				$this -> CurrentColumn	=  1 ;
+				break ;
+
+		   	case 	"\n" :
+				$token 	=  new RtfNewlineToken ( "\n", $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+				$this -> CurrentLine ++ ;
+				$this -> CurrentColumn	=  1 ;
+				break ;
+
+			// Current character is neither "{", nor "}", nor "\" : this is free text
+			// (but we have to handle the case where we encountered a \pict or \bin tag before)
+		   	default :
+				$current_word		=  $this -> __get_tracked_control_word ( ) ;
+
+				// Put some intelligence for common control words such as "\pict" or "\bin"
+				if  ( $current_word )
+				   {
+					if  ( $current_word [ 'token' ] -> ControlWord  ==  'pict' )
+					   {
+						$no_picture	=  false ;
+						$no_binary	=  true ;
+						$is_text	=  false ;
+					    }
+					else if  ( $current_word [ 'token' ] -> ControlWord  ==  'bin' )
+					   {
+						$no_picture	=  true ;
+						$no_binary	=  false ;
+						$is_text	=  false ;
+					    }
+					else
+					   {
+						$no_picture	=  true ;
+						$no_binary	=  true ;
+						$is_text	=  true ;
+					    }
+				    }
+				// For all other control words, gather the data as is
+				else
+				   {
+					$no_binary	=  true ;
+					$no_picture	=  true ;
+					$is_text	=  true ;
+				    }
+
+				// Most common case : this is simply free form text, no more
+		   		if  ( $is_text )
+		   		   {
+		   			$pos 		=  $this -> strchr ( "{}\\", $start ) ;
+
+		   			if  ( $pos  ===  false )
+		   				$pos 	=  $this -> ContentsLength - 1 ;
+		   			else
+		   				$pos -- ;
+
+		   			$data 			=  $this -> substr ( $start, $pos - $start + 1 ) ;
+		   			$token 			=  new RtfPCDataToken ( $data, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+		   			$update_position	=  true ;
+		   			$next_index 		=  $pos + 1 ;
+		   		    }
+				// This free-form text is actually hexadecimal data, because we encountered a \pict tag previously in the Rtf stream
+		   		else if  ( ! $no_picture )
+		   		   {
+		   			$pos 		=  $this -> strchr ( "{}\\", $start ) ;
+
+		   			if  ( $pos  ===  false )
+		   				$pos 	=  $this -> ContentsLength - 1 ;
+		   			else
+		   				$pos -- ;
+
+		   			$data 			=  $this -> substr ( $start, $pos - $start + 1 ) ;
+		   			$token 			=  new RtfSDataToken ( $data, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+		   			$update_position	=  true ;
+		   			$next_index 		=  $pos + 1 ;
+		   		    }
+				// Same case, for \bin
+		   		else 	// ! $no_binary
+		   		   {
+		   			$data 			=  $this -> substr ( $start, $this -> InBinaryData ) ;
+		   			$token 			=  new RtfBDataToken ( $data, $start, $this -> CurrentLine, $this -> CurrentColumn ) ;
+		   			$update_position	=  false ;
+		   			$next_index 		=  $start + $this -> InBinaryData ;
+		   		    }
+
+				// For free-form text and hex data, we have to update the current line and current column accordingly
+		   		if  ( $update_position )
+		   			$this -> __update_position ( $data ) ;
+
+				// When a control word is being tracked, remember that it is related to this raw data 
+				$token -> RelatedControlWord	=  $current_word ;
+		    }
+
+		// All done, return the extracted token
+		return ( $token ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        __enter_control_word - Tracks an explicitly specified control word.
+	
+	    PROTOTYPE
+	        $this -> __enter_control_word ( $word ) ;
+	
+	    DESCRIPTION
+	        Internally declares the specified control word to have been encountered in the current Rtf flow.
+		This method is called by the __get_next_token() method, to remember the last seen tracked control word
+		so far.
+	
+	    PARAMETERS
+	        $word (string) -
+	                Control word to be tracked.
+		
+	 *-------------------------------------------------------------------------------------------------------------*/
+	private function  __enter_control_word ( $token )
+	   {
+		$entry	=  &$this -> TrackedControlWords [ $token -> ControlWord ] ;
+
+		// Stackable control words need to remember the current nesting level...
+		if  ( $entry [ 'stackable' ] )
+			$entry [ 'stack' ] [ $this -> NestingLevel ]	=  
+			   [
+				'token'			=>  $token,
+				'nesting-level'		=>  $this -> NestingLevel, 
+				'value'			=>  $token -> Parameter 
+			    ] ;
+		// ... while non-stackable ones only need to remember the information : "I have been found in the current rtf flow"
+		else
+			$entry [ 'stack' ] [0]				=  
+			   [ 
+				'token'			=>  $token,
+				'nesting-level'		=>  $this -> NestingLevel, 
+				'value'			=>  $token -> Parameter 
+			    ] ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        __leave_control_word - Declares the last seen control word to be out of scope.
+	
+	    PROTOTYPE
+	        $this -> __leave_control_word ( ) ;
+	
+	    DESCRIPTION
+	        Declares the last seen control word to be now out of scope.
+		This method is called internally by __get_next_token() to say that it is no more needed to relate the
+		next raw data to a specific control word.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	private function  __leave_control_word ( ) 
+	   {
+		foreach  ( $this -> TrackedControlWords  as  $word => &$item )
+		   {
+			if  ( $item [ 'stackable' ] )
+			   {
+				$count		=  count ( $item [ 'stack' ] ) ;
+				$new_stack	=  [] ;
+
+				if  ( isset ( $item [ 'stack' ] [ $this -> NestingLevel ] ) )
+					unset ( $item [ 'stack' ] [ $this -> NestingLevel ] ) ;
+			    }
+			else if  ( isset ( $item [ 'stack' ] [0] )  &&  $item [ 'stack' ] [0] [ 'nesting-level' ]  ==  $this -> NestingLevel )
+				unset ( $item [ 'stack' ] [0] ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        __get_tracked_control_word - Gets information about the currently tracked control word.
+	
+	    PROTOTYPE
+	        $info	=  $this -> __get_tracked_control_word ( ) ;
+	
+	    DESCRIPTION
+	        Returns information about the currently tracked control word.
+	
+	    RETURN VALUE
+	        An associative array containing the following keys :
+		- token :
+			An RtfControlWord object that contains information about the tracked control word.
+		- nesting-level :
+			Nesting level where this control word has been encountered.
+		- value :
+			Control word parameter value.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	private function  __get_tracked_control_word ( ) 
+	   {
+		foreach ( $this -> TrackedControlWords  as  $word => $item )
+		   {
+			if  ( $item [ 'stackable' ] )
+				$index		=  $this -> NestingLevel ;
+			else
+				$index		=  0 ;
+			
+			if  ( isset ( $item [ 'stack' ] [ $index ] )  &&  $item [ 'stack' ] [ $index ] [ 'nesting-level' ]  ==  $this -> NestingLevel )
+				return ( $item [ 'stack' ] [ $index ] ) ;
+		    }
+				
+		return ( false ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        __update_position - Updates current line/column position.
+
+	    PROTOTYPE
+	        $this -> __update_position ( $data ) ;
+
+	    DESCRIPTION
+	    	Updates the current line/column index to reflect position change implied by the string $data coming from
+	    	the Rtf input stream.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	private function  __update_position ( $data )
+	   {
+		$newlines 	=  substr_count ( $data, "\n" ) ;
+
+		if  ( $newlines )
+		   {
+	   		$this -> CurrentLine 	+=  $newlines ;
+	   		$length 		 =  strlen ( $data ) ;
+
+			// To update the current column, search for the last newline in the extracted data
+	   		$pos 			 =  strrpos ( $data, "\n" ) ;
+
+	   		if  ( $pos  ===  false )
+	   			$this -> CurrentColumn 	=  1 ;
+	   		else
+	   			$this -> CurrentColumn 	=  $length - $pos ;
+		    }
+		else
+			$this -> CurrentColumn 	+=  strlen ( $data ) ;
+	    }
+    }
+
+
+
+/*==============================================================================================================
+
+    RtfStringParser class -
+        A parser class that works on a string.
+
+  ==============================================================================================================*/
+ class  RtfStringParser		extends  RtfParser
+   {
+	use 	RtfStringSupport ;
+
+	public function  __construct ( $rtfdata, $chunk_size = 4 * 1024 * 1024 )
+	   {
+		parent::__construct ( $rtfdata, $chunk_size ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfFileParser class -
+        A parser class that works on a file.
+
+  ==============================================================================================================*/
+class  RtfFileParser	extends  RtfParser
+   {
+	use 	RtfFileSupport ;
+
+
+	public function  __construct ( $file, $record_size = 16384 )
+	   {
+		parent::__construct ( $file, $record_size ) ;
+	    }
+    }

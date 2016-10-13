@@ -1,0 +1,724 @@
+<?php
+/**************************************************************************************************************
+
+    NAME
+        RtfMergerDocument.phpclass
+
+    DESCRIPTION
+        A class internally used by RtfMerger to store document headers.
+
+    AUTHOR
+        Christian Vigh, 09/2016.
+
+    KNOWN ISSUES
+	. Bullets in lists are not correctly preserved across merged documents.
+
+    HISTORY
+    [Version : 1.0]	[Date : 2016-09-15]     [Author : CV]
+	Initial version.
+
+    [Version : 1.0.1]	[Date : 2016-09-29]     [Author : CV]
+	. Rsid tags were not removed
+	. The following rsid tags did not belong to the list of rsid tags to be removed : styrsid and
+	  rsidroot.
+	. The space after an rsid tag is usually a regular space which belongs to the plain text of the
+	  document. It was undully removed, thus causing non-adjacent characters to become adjacent.
+
+    [Version : 1.0.2]	[Date : 2016-09-30]     [Author : CV]
+	. Changed the visibility of the $Document property from protected to public.
+
+ **************************************************************************************************************/
+
+class  RtfMergerDocument		// extends  Object 
+   {
+	//********** Stuff for the creator of this class - close your eyes...
+	const	RTFMERGER_DEBUG_COLOR_EXTRACTION	=  0x00000001 ;
+	const	RTFMERGER_DEBUG_FONT_EXTRACTION		=  0x00000002 ;
+	const	RTFMERGER_DEBUG_LIST_EXTRACTION		=  0x00000004 ;
+	const	RTFMERGER_DEBUG_OVERRIDE_EXTRACTION	=  0x00000008 ;
+	const	RTFMERGER_DEBUG_STYLESHEET_EXTRACTION	=  0x00000010 ;
+	const	RTFMERGER_DEBUG_SETTINGS		=  0x00000020 ;
+
+	const	RTFMERGER_DEBUG_NONE			=  0 ;
+	const	RTFMERGER_DEBUG_ALL			=  0xFFFFFFFF ;
+
+	private static	$DEBUG				=  self::RTFMERGER_DEBUG_NONE ;
+	//********** End of stuff for the creator of this class - you can now open up your eyes...
+
+	// Parent RtfMerger object
+	protected	$Parent ;
+	// Encapsulated document, inheriting from the RtfDocument class
+	public		$Document ;
+	// Global header (handled by the rtf merger class)
+	protected	$GlobalHeader ;
+	// Offset to the document body
+	protected	$BodyOffset ;
+
+
+
+	// Tables area :
+	//	Tables present in a header are stored in the following element :
+	//	- A global table which will cumulate the local tables found in each document. This table is located into
+	//	  the parent RtfMerger object
+	//	- A local table, which is a subset of the global table, containing only the entries
+	//	  present in this document
+	//	- A mapping table, which makes the correspondance between the document table entry number, 
+	//	  and the one that has been attributed when adding the entry to the global table.
+	//	  An entry is added into this table if :
+	//	  - The entry coming from this document does not yet exist in the global table.
+	//	  - The entry coming from this document exists in the global table, but with a different index
+	//
+	// Example (using the color table introduced by the tag '\colortbl') :
+	//	Suppose that document #1 has the following color entries : A, B and C (color entries #0, #1 and
+	//	#2, respectively, in this document).
+	//	After processing document #1, the properties related to color tables will have the following contents :
+	//
+	//		$GlobalColorTable = [ 'A' => 0, 'B' => 1, 'C' => 2 ] ;
+	//		$ColorTable	  = [ 'A' => 0, 'B' => 1, 'C' => 2 ] ;	// Color table local to this document
+	//		$ColorMappings	  = [] ;				// Empty mappings table, since no color renumbering occurred
+	//
+	//	Now document #2 defines the following color entries : A, B, D, C (note that color "C" already exists
+	//	in document #1, but has index 3 instead of 2) ; the color tables will have the following contents :
+	//
+	//		$GlobalColorTable = [ 'A' => 0, 'B' => 1, 'C' => 2, 'D' => 3 ] ;
+	//		$ColorTable       = [ 'A' => 0, 'B' => 1, 'D' => 3, 'C' => 2 ] ;
+	//		$ColorMappings	  = [ 2 => 3, 3 => 2 ] ;		// Color D, index#2 must be renumbered to #3, and color C
+	//									// with index 3 must be renumbered to #2 in this document
+	// More generally, the global color table has 2 usages :
+	// - Collect all the different colors from the various documents that will be merged, giving them a new index if necessary
+	// - Build a new color table when the merged document header will be generated
+	// The local color table is only used in case some colors were defined more than once in this document.
+	// The mappings table will be used to renumber references to colors in the document currently being merged.
+	// Note that in the above example, colors were named A, B, C, ... Actually,it is their Rtf specification which is used,
+	// "\red255\green0\blue255", for example.
+
+	// Properties related to color remapping
+	protected	$ColorTable			=  [] ;
+	protected	$ColorMappings			=  [] ;
+
+	// Properties related to font remapping
+	protected	$FontMappings			=  [] ;
+
+	// Properties related to list tables
+	protected	$ListMappings			=  [] ;
+
+	// Properties related to style sheets 
+	protected	$StyleMappings			=  [] ;
+
+	// Local settings (ie, settings that are already in the global header with a different value)
+	protected	$LocalSettings			=  [] ;
+
+	// Tags whose parameter needs to be renumbered
+	protected	$TagsToRenumber			=  '(cb) | (cf) | (f) | (af) | (s) | (ls) | (cs) | (ds) | (ts) | (sbasedon) | (snext) | (slink)' ;
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+	
+	    NAME
+	        Constructor
+	
+	    PROTOTYPE
+	        $mdoc	=  new RtfMergerDocument ( $parent, $document ) ;
+	
+	    DESCRIPTION
+	        Instantiates a RtfMergerDocument object and extracts from the document header all the tables that 
+		require special processing, such as renumbering. The following header tables are processed :
+
+		- Color table (\colortbl)
+		- Font table (\fonttbl)
+		- Stylesheet table (\stylesheet)
+		- List tables (\listtable and \listoverridetable)
+
+		Some header parameters are also extracted and a unification process will try to be performed.
+	
+	    PARAMETERS
+	        $parent (RtfMerger) -
+	                The parent RtfMerger object that performs the merge operation on a list of documents to which
+			this document belongs.
+
+		$document (RtfDocument) -
+			A document object inheriting from the RtfDocument class.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  __construct ( $parent, $document, $global_header )
+	   {
+		//parent::__construct ( ) ;
+
+		$this -> Parent		=  $parent ;
+		$this -> Document	=  $document ;
+		$this -> BodyOffset	=  $document -> get_document_start ( ) ;
+		$this -> GlobalHeader	=  $global_header ;
+
+		$header			=  $document -> substr ( 0, $this -> BodyOffset ) ;
+
+		// Extract useful data from the header
+		$this -> ExtractSettings		( $header ) ;
+		$this -> ExtractColorTable		( $header ) ;
+		$this -> ExtractFontTable		( $header ) ;
+		$this -> ExtractListTable		( $header ) ;
+		$this -> ExtractListOverrideTable	( $header ) ;
+		$this -> ExtractStylesheetTable		( $header ) ;
+
+		// Style sheets can have references to colors, fonts, list and so on : we need to renumber them for this document
+		$this -> ReplaceStylesheetReferences ( ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetBody -
+		Retrieves the body part of the document, perform any color/font/stylesheet/list references, along with
+		shape renumberings.
+		Note that the terminating brace ("}") is not included in the return value.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetBody ( $remove_rsid = true ) 
+	   {
+		$data		=  $this -> Document -> substr ( $this -> BodyOffset ) ;
+		$last_index	=  strlen ( $data ) - 1 ;
+
+		while  ( $last_index  >=  0  &&  $data [ $last_index ]  !=  '}' )
+			$last_index -- ;
+
+		$data		=  substr ( $data, 0, $last_index ) ;
+
+		return ( $this -> ReplaceReferences ( $data, $remove_rsid, true ) ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ExtractColorTable -
+		Extracts the color table from the document 
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ExtractColorTable ( $header )
+	   {
+		// Search for a color table
+		$start		=  strpos ( $header, '\colortbl' ) ;
+
+		// Don't forget it's optional
+		if  ( $start  ===  false )
+			return ;
+
+		// Skip past the \colortbl tag then search the closing delimiter
+		$start		       +=  strlen ( '\colortbl' ) ;
+		$end			=  RtfDocument::ToClosingDelimiter ( $header, $start + 1 ) ;
+
+		// Extract the list of colors 
+		$color_table		=  $this -> wipe ( substr ( $header, $start, $end - $start ), ';' ) ;
+		$colors			=  explode ( ';', $color_table ) ;
+
+		// Index to be used when a new color is encountered
+		$next_color_index	=  count ( $this -> GlobalHeader -> ColorTable ) ;
+
+		// Loop through the colors defined in the color table for this document
+		for  ( $i = 0, $count = count ( $colors ) ; $i  <  $count ; $i ++ )
+		   {
+			$color		=  $colors [$i] ;
+
+			// Color is not defined in the local color table ; check if the global color contains it
+			// (that would mean that a previous document has defined it, so we can reuse it)
+			if  ( ! isset ( $this -> ColorTable [ $color ] ) )
+			   {
+				// Yes, the color has been previously defined
+				if  ( isset ( $this -> GlobalHeader -> ColorTable [ $color ] ) )
+					$new_index	=  $this -> GlobalHeader -> ColorTable [ $color ] ;
+				// No, the olor does not exist in the global table : we have to add it
+				else
+				   {
+					$this -> GlobalHeader -> ColorTable [ $color ]	=  $next_color_index ;
+					$new_index					=  $next_color_index ;
+					$next_color_index ++ ;
+				    }
+
+				// Add the color to the local color table
+				$this -> ColorTable [ $color ]		=  $new_index ;
+			    }
+			// We arrive here if the same color has been defined more than once in the document
+			// In this case, we simply reuse the index of the first definition
+			else
+				$new_index	=  $this -> ColorTable [ $color ] ;
+
+			// If the current color index is different from the one we found in our local or global color tables,
+			// then we need to add an entry in the mappings table, because we'll need to renumber the references
+			// to the original index
+			if  ( $i  !=  $new_index )
+				$this -> ColorMappings [$i]	=  $new_index ;
+		    }
+
+		if  ( self::$DEBUG & self::RTFMERGER_DEBUG_COLOR_EXTRACTION )
+		   {
+			echo "Global color table :" ; print_r ( $this -> GlobalHeader -> ColorTable ) ;
+			echo "Color table        :" ; print_r ( $this -> ColorTable ) ;
+			echo "Color mappings     :" ; print_r ( $this -> ColorMappings ) ;
+			echo ( "************************************************************************\n" ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ExtractFontTable -
+		Extracts the font table from the document 
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ExtractFontTable ( $header )
+	   {
+		// Search for a font table
+		$start		=  strpos ( $header, '\fonttbl' ) ;
+
+		// Don't forget it's optional
+		if  ( $start  ===  false )
+			return ;
+
+		// Find the closing delimiter of the font table
+		$end			=  RtfDocument::ToClosingDelimiter ( $header, $start + 1 ) ;
+
+		// Extract the font table part
+		$font_table		=  substr ( $header, $start, $end - $start + 1 ) ;
+
+		// Next font id to be used
+		$next_font_id		=  count ( $this -> GlobalHeader -> FontTable ) ;
+
+		// Now, locate all the groups starting with "{\fx", where "x" is a number : they define a font to be used
+		if  ( ! preg_match_all ( '/(?P<def> \{ \\\\f (?P<id> \d+) )/x', $font_table, $matches, PREG_OFFSET_CAPTURE ) )
+			return ;
+
+		// Loop through results
+		for  ( $i = 0, $count = count ( $matches [ 'id' ] ) ; $i  <  $count ; $i ++ )
+		   {
+			// Extract the font id
+			$font_id		=  $matches [ 'id' ]  [$i] [0] ;
+
+			// Extract the font definition
+			$font_start		=  $matches [ 'def' ] [$i] [1] ;
+			$font_end		=  RtfDocument::ToClosingDelimiter ( $font_table, $font_start + 1 ) ;
+			$font_def		=  substr ( $font_table, $font_start, $font_end - $font_start + 1 ) ;
+
+			// A font hash will be built by removing the font id from the definition (spaces are also removed).
+			// This way, fonts having exactly the same definition but a different font id will use the same
+			// definition with the same id
+			$font_hash		=  preg_replace ( '/\\\\f\d+/', '\f', $this -> wipe ( $font_def ) ) ;
+			$md5_hash		=  md5 ( $font_hash ) ;
+
+			if  ( isset ( $this -> GlobalHeader -> FontTable [ $md5_hash ] ) )
+				$new_font_id		=  $this -> GlobalHeader -> FontTable [ $md5_hash ] [ 'id' ] ;
+			else
+			   {
+				$new_font_id		=  $next_font_id ;
+
+				if  ( $font_id  !=  $new_font_id )
+					$new_font_def	=  preg_replace ( '/\\\\f\d+/', '\f' . $new_font_id, $font_def ) ;
+				else
+					$new_font_def	=  $font_def ;
+
+				$this -> GlobalHeader -> FontTable [ $md5_hash ]	=  [ 'def' => $new_font_def, 'id' => $new_font_id ] ;
+
+				$next_font_id ++ ;
+			    }
+
+			if  ( $font_id  !=  $new_font_id )
+				$this -> FontMappings [ $font_id ]	=  $new_font_id ;
+		    }
+
+		if  ( self::$DEBUG & self::RTFMERGER_DEBUG_FONT_EXTRACTION )
+		   {
+			echo "Global font table : " ; print_r ( $this -> GlobalHeader -> FontTable ) ;
+			echo "Font mappings     : " ; print_r ( $this -> FontMappings ) ;
+			echo ( "************************************************************************\n" ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ExtractListTable -
+		Extracts the list table from the document 
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ExtractListTable ( $header )
+	   {
+		// Search for a list table
+		$start		=  strpos ( $header, '\listtable' ) ;
+
+		// Don't forget it's optional
+		if  ( $start  ===  false )
+			return ;
+
+		// Find the closing delimiter of the font table
+		$end			=  RtfDocument::ToClosingDelimiter ( $header, $start + 1 ) ;
+
+		// Extract the list table part
+		$list_table		=  substr ( $header, $start, $end - $start + 1 ) ;
+
+		// Next list table id to be used
+		$next_list_id		=  count ( $this -> GlobalHeader -> ListTable ) + 1 ;
+
+		// Now, locate all the groups starting with "{\list" : they define a new list entry
+		if  ( ! preg_match_all ( '/\{ \\\\list\b/x', $list_table, $matches, PREG_OFFSET_CAPTURE ) )
+			return ;
+
+		// Loop through results
+		for  ( $i = 0, $count = count ( $matches [0] ) ; $i  <  $count ; $i ++ )
+		   {
+			$list_id	=  $i + 1 ;
+
+			// Extract the list definition
+			$list_start		=  $matches [0] [$i] [1] ;
+			$list_end		=  RtfDocument::ToClosingDelimiter ( $list_table, $list_start + 1 ) ;
+			$list_def		=  substr ( $list_table, $list_start, $list_end - $list_start + 1 ) ;
+
+			// A list hash will be built using the original list definition, by removing all spaces
+			// This way, identical list tables will be referenced by the same id 
+			$list_hash		=  $this -> wipe ( $list_def ) ;
+			$md5_hash		=  md5 ( $list_hash ) ;
+
+			if  ( isset ( $this -> GlobalHeader -> ListTable [ $md5_hash ] ) )
+				$new_list_id	=  $this -> GlobalHeader -> ListTable [ $md5_hash ] [ 'id' ] ;
+			else  
+			   {
+				$new_list_id	=  $next_list_id ;
+
+				$this -> GlobalHeader -> ListTable [ $md5_hash ]	=  [ 'def' => $list_def, 'id' => $new_list_id ] ;
+
+				$next_list_id ++ ;
+			    }
+
+			if  ( $list_id  !=  $new_list_id )
+				$this -> ListMappings [ $list_id ]	=  $new_list_id ;
+		    }
+
+		if  ( self::$DEBUG & self::RTFMERGER_DEBUG_LIST_EXTRACTION )
+		   {
+			echo "Global list table : " ; print_r ( $this -> GlobalHeader -> ListTable ) ;
+			echo "List mappings     : " ; print_r ( $this -> ListMappings ) ;
+			echo ( "************************************************************************\n" ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ExtractListOverrideTable -
+		Extracts the list override table from the document 
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ExtractListOverrideTable ( $header )
+	   {
+		// Search for a font table
+		$start		=  strpos ( $header, '\listoverridetable' ) ;
+
+		// Don't forget it's optional
+		if  ( $start  ===  false )
+			return ;
+
+		// Find the closing delimiter of the list override table
+		$end			=  RtfDocument::ToClosingDelimiter ( $header, $start + 1 ) ;
+
+		// Extract the list override table part
+		$list_table		=  substr ( $header, $start, $end - $start + 1 ) ;
+
+		// Now, locate all the groups starting with "{\listoverride" : they define a list override entry
+		if  ( ! preg_match_all ( '/\{ \\\\listoverride/x', $list_table, $matches, PREG_OFFSET_CAPTURE ) )
+			return ;
+
+		// Loop through results
+		for  ( $i = 0, $count = count ( $matches [0] ) ; $i  <  $count ; $i ++ )
+		   {
+			$list_id	=  $i + 1 ;
+
+			// Extract the list definition
+			$list_start		=  $matches [0] [$i] [1] ;
+			$list_end		=  RtfDocument::ToClosingDelimiter ( $list_table, $list_start + 1 ) ;
+			$list_def		=  substr ( $list_table, $list_start, $list_end - $list_start + 1 ) ;
+
+			if  ( isset ( $this -> ListMappings [ $list_id ] ) )
+				$list_def	=  str_replace ( '\ls' . $list_id, '\ls' . $this -> ListMappings [ $list_id ], $list_def ) ;
+
+			$this -> GlobalHeader -> ListOverrideTable []	=  $list_def ;
+		    }
+
+		if  ( self::$DEBUG & self::RTFMERGER_DEBUG_OVERRIDE_EXTRACTION )
+		   {
+			echo "Global list override table : " ; print_r ( $this -> GlobalHeader -> ListOverrideTable ) ;
+			echo "List mappings              : " ; print_r ( $this -> ListMappings ) ;
+			echo ( "************************************************************************\n" ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ExtractStylesheetTable -
+		Extracts the stylesheet table from the document 
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ExtractStylesheetTable ( $header )
+	   {
+		// Search for a font table
+		$start		=  strpos ( $header, '\stylesheet' ) ;
+
+		// Don't forget it's optional
+		if  ( $start  ===  false )
+			return ;
+
+		// Extract only the styles part from the header
+		$end			=  RtfDocument::ToClosingDelimiter ( $header, $start ) ;
+
+		// Id for the next style
+		$next_style_id		=  count ( $this -> GlobalHeader -> StylesheetTable ) + 1 ;
+
+		// Loop through all style entries 
+		$style_start	=  $start ;
+
+		while  ( $style_start  <  $end  &&  ( $style_start = strpos ( $header, '{', $style_start ) )  !==  false )
+		   {
+			// Extract the style definition from the header
+			$style_end	=  RtfDocument::ToClosingDelimiter ( $header, $style_start + 1 ) ;
+			$style_def	=  substr ( $header, $style_start, $style_end - $style_start + 1 ) ;
+			
+			// Styles may be numbered by the following tags : \s, \*\cs, \*\ds, \*\ts
+			if  ( preg_match ( '/ \\\\ [cdt]? s (?P<id> \d+) /x', $style_def, $match ) )
+			   {
+				$style_id	=  $match [ 'id' ] ;
+
+				$style_hash	=  $this -> wipe ( $style_def ) ;
+				$md5_hash	=  md5 ( $style_hash ) ;
+
+				if  ( isset ( $this -> GlobalHeader -> StylesheetTable [ $md5_hash ] ) )
+					$new_style_id	=  $this -> GlobalHeader -> StylesheetTable [ $md5_hash ] [ 'id' ] ;
+				else  
+				   {
+					$new_style_id	=  $next_style_id ;
+
+					$this -> GlobalHeader -> StylesheetTable [ $md5_hash ]	=  [ 'def' => $style_def, 'id' => $new_style_id ] ;
+
+					$next_style_id ++ ;
+				    }
+
+				if  ( $style_id  !=  $new_style_id )
+					$this -> StyleMappings [ $style_id ]	=  $new_style_id ;
+			    }
+			// Otherwise, this is the default style of the document ; we will retain only the first encountered one for the RtfMerger class
+			else if  ( ! $this -> GlobalHeader -> DefaultStyle )
+				$this -> GlobalHeader -> DefaultStyle	=  $style_def ;
+
+			$style_start	=  $style_end + 1 ;
+		    }
+
+		if  ( self::$DEBUG & self::RTFMERGER_DEBUG_STYLESHEET_EXTRACTION )
+		   {
+			echo "Global stylesheet table : " ; print_r ( $this -> GlobalHeader -> StylesheetTable ) ;
+			echo "Style mappings          : " ; print_r ( $this -> StyleMappings ) ;
+			echo ( "************************************************************************\n" ) ;
+		    }		
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ExtractSettings -
+		Extracts the individual settings of a header. If they are encountered for the first time, they will
+		be put in the global header ; otherwise, they will be kept in the LocalSettings property
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ExtractSettings ( $header )
+	   {
+		// Perform very primitive header scanning by identifying only tags (\something) and compound constructs ({...})
+		$start		=  strpos ( $header, '\\' ) ;
+		$length		=  strlen ( $header ) ;
+
+		while  ( $start  <  $length )
+		   {
+			// Tag found
+			if  ( $header [ $start ]  ==  '\\' )
+			   {
+				// Locate the end of the tag : a space, a backslash or an opening brace
+				$end	=  strcspn ( $header, '\\{ ', $start + 1 ) ;
+
+				// Paranoid case : no end tag found, exit this scanning loop
+				if  ( ! $end )
+					break ;
+
+				// Extract the tag (and its optional parameter) then separate them
+				$fulltag	=  substr ( $header, $start, $end + 1 ) ;
+				preg_match ( '/ (?P<name> \\\\ [a-z]+) (?P<param> -? \d+)? /ix', $fulltag, $match ) ;
+
+				$tag		=  $match [ 'name' ] ;
+				$param		=  isset ( $match [ 'param' ] ) ?  $match [ 'param' ] : '' ;
+
+				// The tag has already been defined by a previous document, since it's already present in the GlobalHeader object
+				if  ( isset ( $this -> GlobalHeader -> Settings [ $tag ] ) )
+				   {
+					// Oops, it was defined with a different parameter - issue a warning then add it to the local settings array
+					// that belong to this document
+					// Note that local settings are not currently processed so, in the current version, the parameters found 
+					// in the first merged document apply for the rest
+					if  ( $this -> GlobalHeader -> Settings [ $tag ]  !=  $param ) 
+					   {
+						warning ( "Tag $tag value mismatch : current = $param, previous = {$this -> GlobalHeader -> Settings [ $tag ]}" ) ;
+						$this -> LocalSettings [ $tag ]	=  $param ;
+					    }
+				    }
+				// First time the time has been encountered : add it to the global header setting
+				else
+					$this -> GlobalHeader -> Settings [ $tag ]	=  $param ;
+
+				if  ( self::$DEBUG & self::RTFMERGER_DEBUG_SETTINGS )
+					echo ( "$tag => $param\n" ) ;
+			    }
+			// Compound construct : ignore it
+			else
+			   {
+				$start	=  RtfDocument::ToClosingDelimiter ( $header, $start + 1 ) ;
+			    }
+
+			// Go to the character past the Rtf construct we just parsed
+			$end		 =  strcspn ( $header, '\\{', $start + 1 ) ;
+			$start		+=  $end + 1 ;
+		    }
+
+		if  ( self::$DEBUG & self::RTFMERGER_DEBUG_SETTINGS )
+		   {
+			echo ( "Local settings : " ) ; print_r ( $this -> LocalSettings ) ;
+			echo ( "************************************************************************\n" ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ReplaceReferences -
+		Replaces renumbered references for fonts, colors, styles, lists and more...
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ReplaceReferences ( $text, $remove_rsid = false, $renumber_shapes = false )
+	   {
+		$tags		=  $this -> TagsToRenumber ;
+
+		if  ( $remove_rsid )
+			$tags	.=  '| (insrsid) | (delrsid) | (charrsid) | (sectrsid) | (pararsid) | (tblrsid) | (styrsid) | (rsidroot) | (rsid)' ;
+
+		if  ( $renumber_shapes )
+			$tags	.=  '| (shplid)' ;
+
+		$regex		=  '/
+					\\\\
+					(?P<tag> ' . $tags . ')
+					(?P<param> \d+) 
+					(?P<space> [ ]?)
+				    /msx' ;
+
+		$text		=  preg_replace_callback ( $regex, [ $this, '__renumbering_callback' ], $text ) ;
+
+		// All done, return
+		return ( $text ) ;
+	    }
+
+	
+	// __renumbering_callback -
+	//	Renumbers the tags that has a new id, due to the fact that the document was merged into a global document.
+	//	Suppresses any rsid tags if present.
+	private function  __renumbering_callback ( $matches )
+	   {
+		$tag		=  $matches [ 'tag' ] ;
+		$id		=  $matches [ 'param' ] ;
+		$space		=  $matches [ 'space' ] ;
+		$new_id		=  $id ;
+
+		switch  ( $matches [ 'tag' ] ) 
+		   {
+			// Color references : use color remappings of the current document
+			case	'cb' :
+			case	'cf' :
+				if  ( isset ( $this -> ColorMappings [ $id ] ) )
+					$new_id		=  $this -> ColorMappings [ $id ] ;
+
+				break ;
+
+			// Font references
+			case	'f' :
+			case	'af' :
+				if  ( isset ( $this -> FontMappings [ $id ] ) )
+					$new_id		=  $this -> FontMappings [ $id ] ;
+
+				break ;
+
+			// List references
+			case	'ls' :
+				if  ( isset ( $this -> ListMappings [ $id ] ) )
+					$new_id		=  $this -> ListMappings [ $id ] ;
+
+				break ;
+
+			// Style sheet references
+			case	'cs' :
+			case	'ds' :
+			case	'ts' :
+			case	'sbasedon' :
+			case	'snext' :
+			case	'slink' :
+				if  ( isset ( $this -> StyleMappings [ $id ] ) )
+					$new_id		=  $this -> StyleMappings [ $id ] ;
+
+				break ;
+
+			// Shapes : a renumbering must be performed at the final merged document level
+			case	'shplid' :
+				$new_id		=  $this -> GlobalHeader -> NextShapeId ++ ;
+				break ;
+
+			// Modification ids : remove them
+			case	'rsid' :
+			case	'insrsid' :
+			case	'delrsid' :
+			case	'charrsid' :
+			case	'sectrsid' :
+			case	'pararsid' :
+			case	'tblrsid' :
+			case	'styrsid' :
+			case	'rsidroot' :
+				return ( $space ) ;
+		    }
+
+		// Return renumbered tag
+		return ( "\\$tag$new_id$space" ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    ReplaceStylesheetReferences -
+		Replaces renumbered references for fonts, colors, styles, lists in style definitions.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  ReplaceStylesheetReferences ( )
+	   {
+		foreach  ( $this -> GlobalHeader -> StylesheetTable  as  $key =>  &$def )
+		   {
+			$def [ 'def' ]	 =  $this -> ReplaceReferences ( $def [ 'def' ], true ) ;
+		    }
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+		Utility functions.		
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+
+	// wipe -
+	//	Takes some rtf contents and removes any spaces from it. The $rtrim parameter can be used to specify additional
+	//	characters to be trim from the right of the supplied contents.
+	//	The result of this function is used to later compare two similar rtf contents that might differ only by a few spaces.
+	private function  wipe ( $value, $rtrim = false ) 
+	   {
+		$value	=  preg_replace ( '/\s+/', '', $value ) ;
+
+		if  ( $rtrim )
+			$value	=  rtrim ( $value, $rtrim ) ;
+
+		return ( $value ) ;
+	    }
+    }

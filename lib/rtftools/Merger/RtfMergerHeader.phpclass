@@ -1,0 +1,263 @@
+<?php
+/**************************************************************************************************************
+
+    NAME
+        RtfMergerHeader.phpclass
+
+    DESCRIPTION
+        An internal class used by RtfMerger to build global header data when performing a merge operation.
+
+    AUTHOR
+        Christian Vigh, 09/2016.
+
+    HISTORY
+    [Version : 1.0]	[Date : 2016-09-17]     [Author : CV]
+	Initial version.
+
+ **************************************************************************************************************/
+
+
+/*==============================================================================================================
+
+    class RtfMergerHeader -
+        Encapsulates global header data needed when merging multiple Rtf documents together.
+
+  ==============================================================================================================*/
+class	RtfMergerHeader			// extends	Object
+   {
+	const		VERSION			=  '1.0' ;
+
+	// Various tables that are located in a Rtf header and that need to be globalized when merging multiple documents
+	public		$ColorTable		=  [] ;			// Color table - no id is associated with a color
+	public		$FontTable		=  [] ;			// Font table
+	public		$ListTable		=  [] ;			// List table - no id associated
+	public		$ListOverrideTable	=  [] ;			// List override table
+	public		$StylesheetTable	=  [] ;			// Style sheet table
+	public		$DefaultStyle		=  false ;		// Default style 
+
+	// Next id for shape renumbering
+	public		$NextShapeId		=  1000 ;		// Ususally, Words starts with this id
+
+	// Document settings
+	public		$Settings		=  [] ;
+
+	// Document information (\info tag)
+	public		$InfoTitle		=  false ;
+	public		$InfoSubject		=  false ;
+	public		$InfoAuthor		=  false ;
+	public		$InfoManager		=  false ;
+	public		$InfoCompany		=  false ;
+	public		$InfoOperator		=  false ;
+	public		$InfoCategory		=  false ;
+	public		$InfoKeywords		=  [] ;
+	public		$InfoComment		=  false ;
+	public		$InfoSummary		=  false ;		// \doccomm tag
+	public		$InfoVersion		=  false ;
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    Constructor -
+		Builds a header object that will be used for merging mutliple Rtf documents together.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  __construct ( )
+	   {
+		//parent::__construct ( ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetHeader -
+		Returns the global header for the output Rtf file.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  BuildHeader ( )
+	   {
+		$header		=  '{' ;
+
+		foreach  ( $this -> Settings  as  $name => $value )
+		   {
+			$header		.=  $name . $value ;
+		    }
+
+		$header		.=  "\r\n" .
+				    $this -> GetFontTable		( ) . "\r\n" .
+				    $this -> GetColorTable		( ) . "\r\n" .
+				    $this -> GetStylesheetTable		( ) . "\r\n" .
+				    $this -> GetListTable		( ) . "\r\n" .
+				    $this -> GetListOverrideTable	( ) . "\r\n" .
+				    $this -> GetGenerator		( ) . "\r\n" .
+				    $this -> GetDocumentInformation	( ) . "\r\n" ;
+
+		return ( $header ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetColorTable -
+		Returns the Rtf code for a color table.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetColorTable ( )
+	   {
+		return
+		   (
+			'{\colortbl' .
+			implode ( ';', array_keys ( $this -> ColorTable ) ) .
+			';}'
+		    ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetDocumentInformation -
+		Returns the Rtf code for document information.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetDocumentInformation ( )
+	   {
+		$now	         =  getdate ( )  ;
+		$creation_time	 =  "{\\creatim\yr{$now[ 'year' ]}\mo{$now[ 'mon' ]}\dy{$now[ 'mday' ]}\hr{$now[ 'hours' ]}\min{$now[ 'minutes' ]}\sec{$now[ 'seconds' ]}}" ;
+		$revision_time	 =  "{\\revtim\yr{$now[ 'year' ]}\mo{$now[ 'mon' ]}\dy{$now[ 'mday' ]}\hr{$now[ 'hours' ]}\min{$now[ 'minutes' ]}\sec{$now[ 'seconds' ]}}" ;
+
+		$info	=  '{\info ' .
+			   $this -> pcdata ( 'title'   , $this -> InfoTitle    ) .
+			   $this -> pcdata ( 'subject' , $this -> InfoSubject  ) .
+			   $this -> pcdata ( 'author'  , $this -> InfoAuthor   ) .
+			   $this -> pcdata ( 'manager' , $this -> InfoManager  ) .
+			   $this -> pcdata ( 'company' , $this -> InfoCompany  ) .
+			   $this -> pcdata ( 'operator', $this -> InfoOperator ) .
+			   $this -> pcdata ( 'category', $this -> InfoCategory ) .
+			   $this -> pcdata ( 'comment' , $this -> InfoComment  ) .
+			   $this -> pcdata ( 'doccomm' , $this -> InfoSummary  ) .
+			   $this -> pcdata ( 'keywords', $this -> InfoKeywords ) ;
+
+		if  ( $this -> InfoVersion  !==  false )
+			$info	.=	'{\version' . $this -> InfoVersion . '}' ;
+
+		$info	.=  "$creation_time$revision_time}\r\n" ;
+
+		return ( $info ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetFontTable -
+		Returns the Rtf code for a font table.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetFontTable ( )
+	   {
+		$result		=  '{\fonttbl' ;
+
+		foreach  ( $this -> FontTable  as  $font )
+			$result		.= "\r\n" . $font [ 'def' ] ;
+
+		$result		.=  '}' ;
+
+		return ( $result ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetGenerator -
+		Returns Rtf generator information.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetGenerator ( )
+	   {
+		$result		=  '{\*\generator ' .
+				   'RtfMerger v' . self::VERSION . ', Christian Vigh (c) 2016' .
+				   '}' ;
+
+		return ( $result ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetListTable -
+		Returns the Rtf code for a list table.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetListTable ( )
+	   {
+		$result		=  '{\*\listtable' ;
+
+		foreach  ( $this -> ListTable  as  $list )
+			$result		.= "\r\n" . $list [ 'def' ] ;
+
+		$result		.=  '}' ;
+
+		return ( $result ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetListOverrideTable -
+		Returns the Rtf code for a list override table.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetListOverrideTable ( )
+	   {
+		return
+		   (
+			'{\*\listoverridetable' .
+			implode ( "\r\n", $this -> ListOverrideTable ) .
+			'}' 
+		    ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    GetStyleSheetTable -
+		Returns the Rtf code for a style sheet table.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  GetStylesheetTable ( )
+	   {
+		$result		=  '{\stylesheet' ;
+
+		if  ( $this -> DefaultStyle )
+			$result		.=  $this -> DefaultStyle ;
+		else
+			$result		.=  "{\\plain \\snext0 Normal;}" ;
+
+		foreach  ( $this -> StylesheetTable  as  $style )
+			$result .=  "\r\n" . $style [ 'def' ] ;
+
+		$result		.=  '}' ;
+
+		return ( $result ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    pcdata -
+		Builds a compound tag containing escaped #PCDATA.
+	
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  pcdata ( $tag, $value )
+	   {
+		if  ( $value  ===  false )
+			return ( '' ) ;
+		else if  ( is_array ( $value ) )
+		   {
+			if  ( ! count ( $value ) )
+				return ( '' ) ;
+
+			$value	=  implode ( ' ', $value ) ;
+		    }
+		
+		return ( '{\\' . $tag . ' ' . RtfDocument::EscapeString ( $value ) . '}' ) ;
+	    }
+    }

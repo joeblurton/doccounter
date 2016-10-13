@@ -1,0 +1,570 @@
+<?php
+/**************************************************************************************************************
+
+    NAME
+	RtfBeautifier.phpclass
+
+    DESCRIPTION
+    	Pretty prints an Rtf file, and puts every syntactic element one per line.
+    	For example, the following contents :
+
+    		{\rtlch\fcs1 \af0\afs24 \ltrch\fcs0 Hello world!}
+
+    	will be output as :
+
+    		{
+    		    \rtlch
+    		    \fcs1
+    		    \af0
+    		    \afs24
+    		    \ltrch
+    		    \fcs0
+    		    Hello world!
+    		}
+
+    	This class has been developed for helping in comparing rtf files. Suppose that you have two different
+    	processes that should generate the same rtf contents ; just let process 1 generate file1, and process 2
+    	generate file2, then run a tool such as windiff to compare both outputs : it will be easier to do that
+    	on syntactic elements that have been separated one per line than on initial contents where some lines
+    	can have hundreds of characters.
+
+    	Of course, don't expect the generated output to be valid rtf. The sole purpose of this class is to help
+    	you debug rtf contents.
+
+    	To create a beautifier object, simply call :
+
+    		$beautifier 	=  new RtfStringBeautifier ( ) ;
+
+    	for strings, or :
+
+    		$beautifier 	=  new RtfFileBeautifier ( ) ;
+
+    	for files.
+
+    	You can retrieve beautified contents using the memory-consuming Beautify() method :
+
+    		$text 	=  $beautifier -> Beautify ( ) ;
+
+    	or save it to a file using the BeautifyTo() method, which can process very large files :
+
+    		$beautifier -> SaveTo ( "file1.txt" ) ;
+
+    AUTHOR
+        Christian Vigh, 04/2016.
+
+    HISTORY
+    [Version : 1.0]	[Date : 2016/04/08]     [Author : CV]
+        Initial version.
+
+    [Version : 1.0.1]   [Date : 2016/08/18]     [Author : CV]
+	. Introduced the RtfException class.
+
+ **************************************************************************************************************/
+
+require_once ( dirname ( __FILE__ ) . '/RtfDocument.phpclass' ) ;
+
+
+/*==============================================================================================================
+
+    RtfBeautifier class -
+        Base class for the RtfStringBeautifier and RtfFileBeautifier classes.
+
+  ==============================================================================================================*/
+abstract class 	RtfBeautifier 	extends  RtfDocument
+   {
+	// Beautifying options
+	const 	BEAUTIFY_GROUP_SPECIAL_WORDS 	=  0x0001 ;
+	const 	BEAUTIFY_SPLIT_ADJACENT_WORDS	=  0x0002 ;
+	const 	BEAUTIFY_SPLIT_CHARS		=  0x0004 ;
+	const 	BEAUTIFY_STRIP_IMAGE_DATA 	=  0x0010 ;
+	const 	BEAUTIFY_STRIP_BIN_DATA 	=  0x0020 ;
+	const 	BEAUTIFY_STRIP_DATA 		=  0x00F0 ;
+	const 	BEAUTIFY_ALL 			=  0xFFFF ;
+
+	// Beautifying options ; A combination of BEAUTIFY_* constants.
+	public 		$Options ;
+	// Indentation size (number of spaces to add at each nesting level)
+	public 		$IndentationSize ;
+
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+		Constructor.
+
+	    PROTOTYPE
+	        parent::__construct ( $options, $indentation_size ) ;
+
+	    DESCRIPTION
+	        Builds an RtfBeautifier object. Since this class is abstract, it can only be called from a derived class,
+	        such as RtfStringBeautifier and RtfFileBeautifier.
+
+	    PARAMETERS
+	    	$options (integer) -
+	    		A combination of BEAUTIFY_* flags :
+
+	    		BEAUTIFY_GROUP_SPECIAL_WORDS :
+	    			When a \*\word construct is encountered, keeps them together instead of putting them
+	    			on a separate line. This works only if the BEAUTIFY_SPLIT_ADJACENT_WORDS flag is set.
+
+	    		BEAUTIFY_SPLIT_ADJACENT_WORDS :
+	    			When several control words are catenated, such as in :
+
+	    				\word1\word2\word3
+
+	    			indicates to the beautifier to split them, one per line, instead of keeping them on
+	    			the same line.
+
+	    		BEAUTIFY_SPLIT_CHARS :
+	    			Indicates whether character code control words (of the form \'xy) should be put on a
+	    			separate line or not.
+	    			For example, "En-tête" is encoded as "En-t\'eate" and the encoded version will be
+	    			output as is if this flag is not specified. When specified, it will output as :
+
+	    				En-t
+	    				\'ea
+	    				te
+
+	    		BEAUTIFY_STRIP_IMAGE_DATA :
+	    			For large files containing many images (\pict control word), it could be of interest
+	    			not to include image data to save space and processing time. In this case, image data
+	    			will be replaced with a comment indicating how many bytes were present.
+
+	    		BEAUTIFY_STRIP_BIN_DATA :
+	    			Same, for \bin control words.
+
+	    		BEAUTIFY_STRIP_DATA :
+	    			Enables the BEAUTIFY_STRIP_IMAGE_DATA and BEAUTIFY_STRIP_BIN_DATA flags.
+
+	    		BEAUTIFY_ALL :
+	    			Enables all flags.
+
+	      	$indentation_size (integer) -
+	      		Specifies how many spaces should be added for each indentation level.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  __construct  ( $options, $indentation_size )
+	   {
+		// Call the parent constructor with the parameters specified after $indentation_size.
+		$argv 		=  func_get_args ( ) ;
+		array_shift ( $argv ) ;
+		array_shift ( $argv ) ;
+
+		call_user_func_array ( [ 'parent', '__construct' ], $argv ) ;
+
+
+		$this -> IndentationSize 	=  $indentation_size ;
+		$this -> Options 		=  $options ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+		AsString - Beautifies the underlying Rtf contents.
+
+	    PROTOTYPE
+	        $text 	=  $beautifier -> AsString ( ) ;
+
+	    DESCRIPTION
+	        Beautifies an Rtf document (either in a string or in a file) and returns its pretty-printed output.
+
+	    RETURN VALUE
+		The pretty-printed Rtf contents.
+
+	    NOTES
+		Contents of the return value are appended data by chunks of $RecordSize characters, to avoid too much
+		memory allocation & copying during processing.
+		For large files, this function will be limited to the available amount of memory.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  AsString ( )
+	   {
+		$text 		=  '' ;
+
+		$this -> BeautifyData
+		   (
+			$this -> RecordSize,
+			function ( $data ) use ( &$text )
+			   { $text .=  $data ; }
+		    ) ;
+
+		return ( $text ) ;
+	    }
+
+
+	public function  __tostring ( )
+	   { return ( $this -> AsString ( ) ) ; }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+		SaveTo - Beautifies the underlying Rtf contents.
+
+	    PROTOTYPE
+	        $text 	=  $beautifier -> SaveTo ( $output ) ;
+
+	    DESCRIPTION
+	        Beautifies an Rtf document (either in a string or in a file) and writes its pretty-printed output to the
+	        specified file.
+
+	    PARAMETERS
+	    	$output (string) -
+	    		Name of the file where the pretty-printed data is to be written.
+
+	    NOTES
+		File contents are written by blocks of $RecordSize characters.
+		This function can process files of any size without eating up all of the available memory.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	public function  SaveTo ( $filename )
+	   {
+		if  ( ! ( $fp = fopen ( $filename, "w" ) ) )
+			error ( new RtfException ( "Could not open file \"$filename\" for writing." ) ) ;
+
+		$this -> BeautifyData
+		   (
+			$this -> RecordSize,
+			function ( $data ) use ( $fp )
+			   { fwrite ( $fp, $data ) ; }
+		    ) ;
+
+		fclose ( $fp ) ;
+	    }
+
+
+	/*--------------------------------------------------------------------------------------------------------------
+
+	    NAME
+	        BeautifyData - Internally performs the beautifying process.
+
+	    PROTOTYPE
+	        $this -> BeautifyData ( $record_size, $callback ) ;
+
+	    DESCRIPTION
+	        Protected function that performs the beautifying process. Called by the Beautify() and BeautifyTo()
+	        public methods.
+
+	    PARAMETERS
+	    	$record_size (integer) -
+	    		Size of an output record. Although the term "output record" for string contents does not seem
+	    		to make sense, it does have one : BeautifyData works with an internal string buffer where it
+	    		catenates every new syntactic element extracted from the rtf contents.
+
+	    		 When this string buffer reaches (or gets bigger than, see the NOTES section) $record_size
+	    		 characters, the callback specified by the Beautify() function catenates it to the final
+	    		 result.
+
+	    		 This is especially useful when processing large files, because it reduces the number of
+	    		 large memory allocations and copies needed during the catenation of the string buffer to the
+	    		 final result.
+
+	    	$callback (callback) -
+	    		Callback that is called each time $record_size characters have been processed. The callback
+	    		has one parameter, $data, which is the data collected so far, up to $record_size characters.
+
+	    NOTES
+		The internal string buffer can grow beyond $record_size characters ; this is particularly common for
+		picture data, which is considered as a single syntactic element and can contain several kilobytes or
+		megabytes of hexadecimal data. Doing so avoids to test throughout the code, each time we process a
+		character or jump to a searched one, if we've gone past $record_size character. This is a trade-off
+		between memory and performance.
+
+		Whatever the size of the internal buffer is, the callback will be called with data of at most
+		$record_size characters.
+
+	 *-------------------------------------------------------------------------------------------------------------*/
+	protected function  BeautifyData ( $record_size, $callback )
+	   {
+		// Internal buffer for collecting characters from syntactic elements
+		$data 				=  '' ;
+		$data_length 			=  0 ;
+
+		// Get our contents size
+		$contents_length 		=  count ( $this ) ;
+
+		// Indentation spaces to add each time we enter a new nesting level
+		$indent 			=  str_repeat ( ' ', $this -> IndentationSize ) ;
+
+		// Prefix (of enough indentation spaces) to be prepended to each line
+		$prefix 			=  '' ;
+
+		// Last token type ; this is useful for constructs such as \*\word, if the BEAUTIFY_GROUP_SPECIAL_WORDS flag is set.
+		$last_token_type 		=  self::TOKEN_INVALID ;
+
+		// Tells whether last token was "\*" ; this is useful for constructs such as \*\word, if the BEAUTIFY_GROUP_SPECIAL_WORDS flag is set.
+		$last_was_special 		=  false ;
+
+		// Compute option flags only once
+		$split_chars 			=  ( $this -> Options & self::BEAUTIFY_SPLIT_CHARS )  !=  0 ;
+		$group_special_words 		=  ( $this -> Options &  ( self::BEAUTIFY_GROUP_SPECIAL_WORDS | self::BEAUTIFY_SPLIT_ADJACENT_WORDS ) )  ==
+							self::BEAUTIFY_GROUP_SPECIAL_WORDS | self::BEAUTIFY_SPLIT_ADJACENT_WORDS ;
+		$strip_pictures			=  ( $this -> Options & self::BEAUTIFY_STRIP_IMAGE_DATA )  !=  0 ;
+		$strip_bin			=  ( $this -> Options & self::BEAUTIFY_STRIP_BIN_DATA )  !=  0 ;
+
+		// A flag that tells we're in a picture (\pict) - this will be true until we find textual data (hex bytes of the picture)
+		// It holds the nesting level where the \pict tag was found
+		$in_picture			=  false ;
+		$in_picture_nesting_level	=  0 ;
+
+		// Another flag that tells we have encountered binary data (\bin)
+		$in_bin				=  false ;
+
+		// Current nesting level
+		$nesting_level 		=  0 ;
+
+		// Characters that start a new syntactic element. Notes that control words can be followed by an optional space,
+		// which is part of the control word itself.
+		// If we don't want to split adjacent words, then we will only look to "{", "}" and " ", but not "\".
+		$eow_chars		=  ( $this -> Options  &  self::BEAUTIFY_SPLIT_ADJACENT_WORDS ) ?  '{}\\ ' : '{} ' ;
+
+		// Loop through Rtf contents ; we will try to use the builtin search functions as much as possible to
+		// jump after the end of a construct (and extract it using substr()), because we don't want to iterate over
+		// each and every character of the contents
+		for  ( $i = 0 ; $i  <  $contents_length ; $i ++ )
+		   {
+			$ch 		=  $this [$i] ;		// Current character
+			$output 	=  '' ;			// Extracted data : either "{", "}", a control word or regular (textual) data
+
+			switch  ( $ch )
+			   {
+				// Opening brace : count one more nesting level
+				case 	'{' :
+					$output			=  "$prefix{\r\n" ;
+					$last_token_type	=  self::TOKEN_LBRACE ;
+					$last_was_special 	=  false ;
+
+					$nesting_level ++ ;
+					$prefix			=  ( $nesting_level  >=  0 ) ?  str_repeat ( $indent, $nesting_level ) : '' ;
+
+					// Don't forget the optional space after it
+					if  ( isset ( $this [ $i + 1 ] )  &&  $this [ $i + 1 ]  ==  ' ' )
+						$i ++ ;
+
+					break ;
+
+				// Closing brace : count one nesting level less
+				case 	'}' :
+					$nesting_level -- ;
+					$prefix			=  ( $nesting_level  >=  0 ) ?  str_repeat ( $indent, $nesting_level ) : '' ;
+
+					$output			=  "$prefix }\r\n" ;
+					$last_token_type	=  self::TOKEN_RBRACE ;
+					$last_was_special 	=  false ;
+
+					// Don't forget the optional space after it
+					if  ( isset ( $this [ $i + 1 ] )  &&  $this [ $i + 1 ]  ==  ' ' )
+						$i ++ ;
+
+					break ;
+
+				// Control word : collect data until a new syntactic element is found
+				case 	'\\' :
+					$this_one_is_special 	=  false ;
+					$next 			=  false ;
+
+					// Check if we have to split character codes of the form : \'xy
+					if  ( $split_chars  &&
+					      $i + 3  <  $contents_length  &&
+					      $this [ $i + 1 ]  ==  "'" )
+						$next 	=  $i + 4 ;
+					// Check if we have to keep "\*" grouped with the next control word
+					else if  ( $group_special_words  &&
+						   $i + 1  <  $contents_length )
+					   {
+						$nextch 	=  $this [ $i + 1 ] ;
+
+						if  ( $nextch  ==  '*' )
+						   {
+							$this_one_is_special 	=  true ;
+							$next 			=  $i + 2 ;
+						    }
+						else if  ( ! ctype_alnum ( $nextch ) )
+							$next 			=  $i + 2 ;
+					    }
+
+					if  ( $next  ===  false )
+						$next		=  $this -> strchr ( "$eow_chars\r\n", $i + 1 ) ;
+
+					// If not found, take remaining contents
+					if  ( $next  ===  false )
+						$next 	=  $contents_length - 1 ;
+
+					$endch		=  $this [ $next ] ;
+
+					// Some adjustments may be needed :
+					switch ( $endch )
+					   {
+						// Space : nothing to do, it is part of the control word
+						case	' ' :
+							break ;
+
+						// Other ("{", "}" or "\") : we need to go to the character before it,
+						// because it is not part of this control word
+						default :
+							$next -- ;
+					    }
+
+					// Extract the control word
+					$text		 =  $this -> substr ( $i, $next - $i + 1 ) ;
+
+					if ( $last_token_type  ==  self::TOKEN_LBRACE )
+					   {
+						if  ( ! strncasecmp ( $text, '\\pict', 5 ) )
+						   {
+							$in_picture			=  true ;
+							$in_picture_nesting_level	=  $nesting_level ;
+						    }
+						else if  ( ! strncasecmp ( $text, '\\bin', 4 ) )
+						   {
+							if  ( preg_match ( '/\w+(?P<size>\d+)/', $matches ) )
+								$in_bin		=  $matches [ 'size' ] ;
+						    }
+					    }
+
+					$i		 =  $next ;	// Update loop index
+
+					// If we have encountered "\*", then don't put a newline after it
+					if (  $this_one_is_special )
+					   {
+						$last_was_special 	=  true ;
+						$output 		=  "$prefix$text" ;
+					    }
+					// Similarly, if the last word was "\*", then don't add any indentation before this one
+					else if  ( $last_was_special )
+					   {
+						$last_was_special 	= false ;
+						$output 		=  "$text\r\n" ;
+					    }
+					// Normal case : output prefix, text and newline
+					else
+					    {
+					    	$last_was_special 	= false ;
+					    	$output 		=  "$prefix$text\r\n" ;
+					    }
+
+					$last_token_type =  self::TOKEN_CONTROL_WORD ;
+					break ;
+
+				// Ignore line breaks
+				case	"\r" :
+				case	"\n" :
+					continue ;
+
+				// Other : collect the data until the next syntactic element ("{", "}" or control word)
+				default :
+					if  ( $in_picture  &&  $in_picture_nesting_level  ==  $nesting_level  &&  $strip_pictures )
+						$next		=  $this -> strchr ( '}', $i ) ;
+					else
+
+						$next		=  $this -> strchr ( '{}\\', $i ) ;
+
+					// If not found, take remaining contents
+					if  ( $next  ===  false )
+						$next 	=  $contents_length - 1 ;
+					// Otherwise, move one character backward : this is then end of our data
+					else
+						$next -- ;
+
+					// Ignore picture data if needed and replace it with a comment
+					if  ( $in_picture  &&  $in_picture_nesting_level  ==  $nesting_level  &&  $strip_pictures )
+					   {
+						$text				=  "/* " . ( $next - $i - 1 ) . " bytes of image data not shown */" ;
+						$in_picture			=  false ;
+						$in_picture_nesting_level	=  0 ;
+					    }
+					// Also ignore binary data if needed
+					else if  ( $in_bin  !==  false )
+					   {
+						if  ( $strip_bin )
+						   {
+							$text	=  "/* $in_bin bytes of binary data not shown */" ;
+							$in_bin =  false ;
+						    }
+						else
+							$text	=  $this -> substr ( $i, $in_bin ) ;
+
+						$next	=  $i + $in_bin - 1 ;
+					    }
+					else
+						$text		 	=  $this -> substr ( $i, $next - $i + 1 ) ;
+
+					// Extract the substring and indent the contents
+					$text		 	=  str_replace ( "\n", "\n$prefix", rtrim ( $text, "\r\n" ) ) ;
+
+					$i		 	=  $next ;	// Update loop index
+
+					$output		 	=  "$prefix$text\r\n" ;
+					$last_was_special 	=  false ;
+
+			    }
+
+			// Now append what we have found to our internal buffer
+			$output_length 	 =  strlen ( $output ) ;
+			$data 		.=  $output ;
+			$data_length 	+=  $output_length ;
+
+			// If we collected more than $record_size characters in our internal buffer, "flush" it
+			// by repeatedly invoking the callback
+			if  ( $data_length  >=  $record_size )
+			   {
+				for  ( $j = 0 ; $j + $record_size  <=  $data_length ; $j += $record_size )
+					$callback ( substr ( $data, $j, $record_size ) ) ;
+
+				// Some data may remain
+				if  ( $j  <  $data_length )
+				   {
+					$data 		=  substr ( $data, $j ) ;
+					$data_length 	=  strlen ( $data ) ;
+				    }
+				else
+				   {
+					$data 		=  '' ;
+					$data_length 	=  0 ;
+				    }
+			    }
+		    }
+
+		// Sure the size of the generated output won't be a multiple of $record_size characters, so
+		// pass remaining data to the callback
+		if  ( $data_length )
+			$callback ( $data ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfStringBeautifier class -
+        A beautifier class that works on a string.
+
+  ==============================================================================================================*/
+ class  RtfStringBeautifier	extends  RtfBeautifier
+   {
+	use 	RtfStringSupport ;
+
+	public function  __construct ( $rtfdata, $options = self::BEAUTIFY_ALL, $indentation_size = 4, $chunk_size = 4 * 1024 * 1024 )
+	   {
+		parent::__construct ( $options, $indentation_size, $rtfdata, $chunk_size ) ;
+	    }
+    }
+
+
+/*==============================================================================================================
+
+    RtfFileBeautifier class -
+        A beautifier class that works on a file.
+
+  ==============================================================================================================*/
+class  RtfFileBeautifier	extends  RtfBeautifier
+   {
+	use 	RtfFileSupport ;
+
+
+	public function  __construct ( $file, $options = self::BEAUTIFY_ALL, $indentation_size = 4, $record_size = 16384 )
+	   {
+		parent::__construct ( $options, $indentation_size, $file, $record_size ) ;
+	    }
+    }
