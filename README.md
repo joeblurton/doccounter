@@ -1,7 +1,7 @@
 # DocCounter
-A collection of simple tools for analysing PDF, .DOCX, .DOC and .TXT files.
+A collection of simple tools for analysing .PDF, .DOCX, .DOC and .TXT files.
 
-I was struggling to find a comprehensive set of tools to do simple word, line and page counts for a variety of commonly used document formats. A lot of the conversion scripts and tools were unsuitable, somehow lacking, or poorly documented. So after a bit of head-scratching here is a simple working set of tools assembled in a workmanlike class to combine them for the purposes of my own projects.
+I was struggling to find a comprehensive set of tools to do simple word, line and page counts for a variety of commonly used document formats. A lot of the conversion scripts and tools were unsuitable, somehow lacking, or poorly documented. So after a bit of head-scratching here is a simple working set of tools assembled into a workmanlike class.
 
 I hope the tool is useful to people.
 
