@@ -227,7 +227,7 @@ class DocCounter {
         //absolute path for file
         $path = getcwd();
         $f = $path."/".$this->file;
-        echo $f;
+        
         if (file_exists($f)) {
             include('vendor/autoload.php');
             $parser = new \Smalot\PdfParser\Parser();
