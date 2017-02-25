@@ -20,7 +20,7 @@ echo ($doc->getInfo()->wordCount);
 No constructor variables are required to initiate the class.
 
 ### setFile( [filepath] )
-Does what it says on the tin.
+Does what it says on the tin. The class uses the current working directory so will require folder references depending on your installation.
 
 ### getInfo()
 Returns an object with the following properties:
@@ -46,3 +46,9 @@ Quick list of missing formats:
 * RTF (without shell access, all solutions found so far leave metadata/header info in text output).
 * ODT.
 * The millions of others I've forgotten.
+
+## Version History
+
+* 1.0.2 - Features - all filepaths now relative to cwd, new word count method.
+* 1.0.1 - Bugfix - Removed unnecessary zip->close() to remove warning.
+* 1.0.0 - Initial release.
