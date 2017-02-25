@@ -8,7 +8,7 @@
  *    Joseph Blurton (http://github.com/foo/bar)
  *    And other contributors (see attrib below)
  *  
- *  Version 1.0.1
+ *  Version 1.0.2
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -35,6 +35,9 @@
  * read_word_doc by
  * Davinder Singh
  * http://stackoverflow.com/questions/7358637/reading-doc-file-in-php
+ *
+ * Jonny 5's simple word splitter
+ * http://php.net/manual/en/function.str-word-count.php#107363
  * 
  * Line Count method by K2xL
  * http://stackoverflow.com/questions/7955402/count-lines-in-a-posted-string
@@ -85,23 +88,23 @@ class DocCounter {
         {
             case "doc":
                 $doc = $this->read_doc_file();
-                $obj->wordCount = str_word_count($doc);
+                $obj->wordCount = $this->str_word_count_utf8($doc);
                 $obj->lineCount = $this->lineCount($doc);
                 $obj->pageCount = $this->pageCount($doc);
                 break;
             case "docx":
-                $obj->wordCount = str_word_count($this->docx2text());
+                $obj->wordCount = $this->str_word_count_utf8($this->docx2text());
                 $obj->lineCount = $this->lineCount($this->docx2text());
                 $obj->pageCount = $this->PageCount_DOCX();
                 break;
             case "pdf":
-                $obj->wordCount = str_word_count($this->pdf2text());
+                $obj->wordCount = $this->str_word_count_utf8($this->pdf2text());
                 $obj->lineCount = $this->lineCount($this->pdf2text());
                 $obj->pageCount = $this->PageCount_PDF();
                 break;
             case "txt":
                 $textContents = file_get_contents($this->file);
-                $obj->wordCount = str_word_count($textContents);
+                $obj->wordCount = $this->str_word_count_utf8($textContents);
                 $obj->lineCount = $this->lineCount($textContents);
                 $obj->pageCount = $this->pageCount($textContents);
                 break;
@@ -116,7 +119,9 @@ class DocCounter {
     
     // Convert: Word.doc to Text String
     function read_doc_file() {
-        $f = $this->file;
+        
+        $path = getcwd();
+        $f = $path."/".$this->file;
          if(file_exists($f))
         {
             if(($fh = fopen($f, 'r')) !== false ) 
@@ -149,6 +154,10 @@ class DocCounter {
             }
         }
     }
+    // Jonny 5's simple word splitter
+    function str_word_count_utf8($str) {
+        return count(preg_split('~[^\p{L}\p{N}\']+~u',$str));
+    }
     // Convert: Word.docx to Text String
     function docx2text()
     {
@@ -159,9 +168,13 @@ class DocCounter {
     {
         // Create new ZIP archive
         $zip = new ZipArchive;
+        
+        // set absolute path
+        $path = getcwd();
+        $f = $path."/".$archiveFile;
 
         // Open received archive file
-        if (true === $zip->open($archiveFile)) {
+        if (true === $zip->open($f)) {
             // If done, search for the data file in the archive
             if (($index = $zip->locateName($dataFile)) !== false) {
                 // If found, read it to the string
@@ -189,7 +202,9 @@ class DocCounter {
     // Convert: Word.doc to Text String
     function read_doc()
     {
-        $fileHandle = fopen($this->file, "r");
+        $path = getcwd();
+        $f = $path."/".$this->file;
+        $fileHandle = fopen($f, "r");
         $line = @fread($fileHandle, filesize($this->file));   
         $lines = explode(chr(0x0D),$line);
         $outtext = "";
@@ -212,6 +227,7 @@ class DocCounter {
         //absolute path for file
         $path = getcwd();
         $f = $path."/".$this->file;
+        echo $f;
         if (file_exists($f)) {
             include('vendor/autoload.php');
             $parser = new \Smalot\PdfParser\Parser();
@@ -229,8 +245,11 @@ class DocCounter {
         $pageCount = 0;
 
         $zip = new ZipArchive();
+        
+        $path = getcwd();
+        $f = $path."/".$this->file;
 
-        if($zip->open($this->file) === true) {
+        if($zip->open($f) === true) {
             if(($index = $zip->locateName('docProps/app.xml')) !== false)  {
                 $data = $zip->getFromIndex($index);
                 $zip->close();
