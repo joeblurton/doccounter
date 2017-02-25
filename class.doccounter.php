@@ -4,8 +4,8 @@
  * A collection of simple tools for analysing 
  * .PDF, .DOCX, .DOC and .TXT docs. 
  * 
- *  Copyright (C) 2016
- *    Joseph Blurton (http://github.com/foo/bar)
+ *  Copyright (C) 2016-2017
+ *    Joseph Blurton (http://github.com/joeblurton)
  *    And other contributors (see attrib below)
  *  
  *  Version 1.0.2
