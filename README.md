@@ -1,4 +1,6 @@
-# DocCounter
+# DocCounter **[Obsolete]**
+_Users found too much variance in the output with different save files. I recomend using the LibreOffice cli tools to achieve the same ends. Example code may follow.
+
 A collection of simple tools for analysing .PDF, .DOCX, .DOC and .TXT files.
 
 I was struggling to find a comprehensive set of tools to do simple word, line and page counts for a variety of commonly used document formats. A lot of the conversion scripts and tools were unsuitable, somehow lacking, or poorly documented. So after a bit of head-scratching here is a simple working set of tools assembled into a workmanlike class.
