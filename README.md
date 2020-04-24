@@ -1,5 +1,5 @@
 # DocCounter **[Obsolete]**
-_Users found too much variance in the output with different save files. I recomend using the LibreOffice cli tools to achieve the same ends. Example code may follow.
+_Users found too much variance in the output with different save files. I recomend using the LibreOffice cli tools to achieve the same ends. Example code may follow._
 
 A collection of simple tools for analysing .PDF, .DOCX, .DOC and .TXT files.
 
